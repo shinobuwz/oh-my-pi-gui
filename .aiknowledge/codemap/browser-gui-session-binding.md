@@ -13,7 +13,7 @@
 
 ## Boundaries
 
-`bridge-server` 只负责 loopback HTTP、静态资源与令牌/Host/Origin 校验；UI 语义由 `ExtensionUIContext` 契约定义；页面永不接触宿主凭据、session 文件或任意方法调用。
+`bridge-server` 只负责 loopback HTTP、静态资源、令牌/Host/Origin 校验、禁用端口自检与重绑；UI 语义由 `ExtensionUIContext` 契约定义；页面永不接触宿主凭据、session 文件或任意方法调用。
 
 ## Read next
 
