@@ -1163,6 +1163,191 @@ code {
 	margin-top: 2px;
 }
 
+/* --------------------------------------------- structured subagent view -- */
+
+/* Two distinct read-only views: the structured view is a bounded pane inside the run
+   card (it scrolls internally, so it can never cover the chat, the composer or a
+   neighbouring card), the transcript stays the raw artifact tail underneath it. */
+.subagent-run-note {
+	margin: var(--sp-1) 0 0;
+	color: var(--text-3);
+	font-size: var(--fs-xs);
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+.subagent-inspect {
+	display: grid;
+	gap: var(--sp-2);
+	min-width: 0;
+	margin-top: var(--sp-2);
+}
+
+.subagent-inspect-toggle {
+	justify-self: start;
+	font-size: var(--fs-sm);
+}
+
+.subagent-inspect-panel {
+	display: grid;
+	gap: var(--sp-2);
+	width: 100%;
+	min-width: 0;
+	max-height: min(52vh, 26rem);
+	padding: var(--sp-2) var(--sp-3);
+	border: 1px solid var(--line);
+	border-radius: var(--radius-ctl);
+	background: var(--bg);
+	overflow-x: hidden;
+	overflow-y: auto;
+	overscroll-behavior: contain;
+}
+
+.subagent-inspect-status {
+	margin: 0;
+	color: var(--text-3);
+	font-size: var(--fs-sm);
+	overflow-wrap: anywhere;
+}
+
+.subagent-inspect-status[data-state="waiting"] {
+	color: var(--warn);
+}
+
+.subagent-inspect-status[data-state="error"] {
+	color: var(--err);
+}
+
+.subagent-inspect-body {
+	display: grid;
+	gap: var(--sp-2);
+	min-width: 0;
+}
+
+.subagent-inspect-meta,
+.subagent-inspect-heading {
+	margin: 0;
+	color: var(--text-3);
+	font-size: var(--fs-xs);
+	overflow-wrap: anywhere;
+}
+
+.subagent-inspect-heading {
+	font-weight: 600;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+}
+
+.subagent-inspect-task {
+	margin: 0;
+	padding-left: var(--sp-2);
+	border-left: 1px solid var(--line-strong);
+	color: var(--text-2);
+	font-size: var(--fs-sm);
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+.subagent-inspect-messages {
+	display: grid;
+	gap: var(--sp-2);
+	margin: 0;
+	padding: 0;
+	list-style: none;
+	min-width: 0;
+}
+
+.subagent-inspect-message {
+	display: grid;
+	gap: 2px;
+	min-width: 0;
+}
+
+/* Tool rows reuse the chat blocks' language: dim micro label, leading hairline only. */
+.subagent-inspect-message[data-kind="toolCall"],
+.subagent-inspect-message[data-kind="toolResult"] {
+	padding-left: var(--sp-2);
+	border-left: 1px solid var(--line-dim);
+}
+
+.subagent-inspect-message[data-kind="toolResult"] {
+	border-left-color: var(--line-strong);
+}
+
+.subagent-inspect-message[data-state="error"] {
+	border-left-color: var(--err);
+}
+
+.subagent-inspect-label {
+	margin: 0;
+	color: var(--text-3);
+	font-size: var(--fs-xs);
+	letter-spacing: 0.04em;
+	overflow-wrap: anywhere;
+}
+
+.subagent-inspect-message[data-kind="toolCall"] .subagent-inspect-label,
+.subagent-inspect-message[data-kind="toolResult"] .subagent-inspect-label {
+	text-transform: uppercase;
+}
+
+.subagent-inspect-text {
+	margin: 0;
+	color: var(--text);
+	font-size: var(--fs-sm);
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+.subagent-inspect-message[data-kind="toolResult"] .subagent-inspect-text {
+	color: var(--text-2);
+}
+
+.subagent-inspect-message[data-state="error"] .subagent-inspect-label,
+.subagent-inspect-message[data-state="error"] .subagent-inspect-text {
+	color: var(--err);
+}
+
+.subagent-inspect-final {
+	max-height: 18rem;
+	margin: 0;
+	padding: var(--sp-2);
+	border: 1px solid var(--line-strong);
+	border-radius: var(--radius-ctl);
+	background: var(--surface-2);
+	color: var(--text-2);
+	font-size: var(--fs-sm);
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	overflow-y: auto;
+}
+
+.subagent-inspect-note,
+.subagent-inspect-empty,
+.subagent-inspect-unavailable {
+	margin: 0;
+	color: var(--text-3);
+	font-size: var(--fs-xs);
+	overflow-wrap: anywhere;
+}
+
+.subagent-inspect-note[data-state="warning"] {
+	color: var(--warn);
+}
+
+.subagent-child {
+	min-width: 0;
+}
+
+.subagent-child > .subagent-inspect,
+.subagent-child > .subagent-inspect-unavailable {
+	margin-top: var(--sp-1);
+}
+
+.subagent-child-list {
+	margin-top: var(--sp-1);
+}
+
 /* ------------------------------------------------------------------- auth -- */
 
 #auth {

@@ -32,8 +32,20 @@ export const DEFAULT_ASSETS_DIR = fileURLToPath(new URL("../browser/", import.me
 export const DEFAULT_URL_FILE = ".browser-ui/url";
 /** Single binding generation: the GUI owns one session per process and never rebinds in place. */
 export const HOST_GENERATION = 1;
-/** Extension mode: `tui` enables interaction-gated extensions such as questionnaire. */
-export const HOST_UI_MODE = "tui";
+/**
+ * Extension mode for `session.bindExtensions()`.
+ *
+ * `rpc` keeps every dialog capability (`confirm` / `select` / `input` / `editor` still land
+ * in the browser — Pi's contract gives rpc the same dialog surface as tui and `hasUI()`
+ * only depends on a UI context being provided), and it unlocks pi-subagents' host inspect
+ * command `/subagents-inspect-rpc`, which refuses to emit its structured reply on tui
+ * surfaces (`ctx.mode === "tui"` gate).
+ *
+ * Known, accepted cost: extensions that gate themselves on `ctx.mode !== "tui"`
+ * (questionnaire, Pi's llama extension) take their non-interactive branch and report their
+ * own failure text; the host renders that text as-is and never hangs or fakes an answer.
+ */
+export const HOST_UI_MODE = "rpc";
 
 /** Startup failure with the resolution attempts that led to it. */
 export class HostStartupError extends Error {
@@ -211,6 +223,9 @@ export function createHostLifecycle({ generation = HOST_GENERATION } = {}) {
 		sessionSubagentsDetails: (expectedGeneration, body) => (subagents
 			? subagents.details(expectedGeneration, body)
 			: Promise.resolve(notAttachedSubagents())),
+		sessionSubagentsInspect: (expectedGeneration, body) => (subagents
+			? subagents.inspect(expectedGeneration, body)
+			: Promise.resolve(notAttachedSubagents())),
 		sessionSubagentsRefresh: (expectedGeneration, body) => (subagents
 			? subagents.refresh(expectedGeneration, body)
 			: Promise.resolve(notAttachedSubagents())),
@@ -251,6 +266,7 @@ function readSessionFile(session) {
  * @param {Function} [options.statusExecFile] `execFile` seam for the read-only Git query
  * @param {number} [options.subagentsTimeoutMs] read-only subagents RPC timeout (tests)
  * @param {number} [options.subagentsEventDebounceMs] subagents hint coalescing window (tests)
+ * @param {number} [options.subagentsInspectTimeoutMs] structured inspection deadline (tests)
  * @returns {Promise<object>} the running host handle
  */
 export async function startHost({
@@ -275,6 +291,7 @@ export async function startHost({
 	statusExecFile = undefined,
 	subagentsTimeoutMs = undefined,
 	subagentsEventDebounceMs = undefined,
+	subagentsInspectTimeoutMs = undefined,
 } = {}) {
 	let store = null;
 	let uiContext = null;
@@ -525,8 +542,14 @@ export async function startHost({
 				eventBus: subagentsChannel.eventBus,
 				generation: HOST_GENERATION,
 				logger,
+				// The structured inspect channel drives the pi-subagents command through this
+				// session and captures its widget payload from our UI context; neither path
+				// touches the chat bridge or the model.
+				session,
+				uiContext,
 				...(Number.isFinite(subagentsTimeoutMs) && subagentsTimeoutMs > 0 ? { timeoutMs: subagentsTimeoutMs } : {}),
 				...(Number.isFinite(subagentsEventDebounceMs) && subagentsEventDebounceMs >= 0 ? { eventDebounceMs: subagentsEventDebounceMs } : {}),
+				...(Number.isFinite(subagentsInspectTimeoutMs) && subagentsInspectTimeoutMs > 0 ? { inspectTimeoutMs: subagentsInspectTimeoutMs } : {}),
 			}));
 		} else {
 			logger(`browser subagents: the read-only pi-subagents panel stays unattached: ${subagentsChannel.reason}`);

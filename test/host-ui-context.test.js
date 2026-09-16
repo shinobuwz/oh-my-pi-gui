@@ -9,10 +9,13 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { RequestStore } from "../src/core/request-store.js";
+import { INSPECT_PAYLOAD_PREFIX, INSPECT_WIDGET_KEY } from "../src/core/inspect-reply.js";
 import {
 	BROWSER_PLAIN_THEME,
 	CUSTOM_UNSUPPORTED_MESSAGE,
 	createBrowserUIContext,
+	MAX_INSPECT_WIDGET_CHARS,
+	MAX_WIDGET_CAPTURES,
 	UI_DIALOG_MEMBERS,
 	UI_HOST_MEMORY_MEMBERS,
 	UI_UNAVAILABLE_MEMBERS,
@@ -284,5 +287,96 @@ describe("browser UI context degradation", () => {
 		assert.deepEqual([...declared].sort(), [...UI_CONTRACT_MEMBERS].sort());
 		assert.deepEqual(declared.slice(0, 4), ["confirm", "select", "input", "editor"]);
 		assert.deepEqual(uiContext.support.unsupported, ["custom"]);
+	});
+});
+
+describe("browser UI context widget capture", () => {
+	it("keeps an emit-then-retract inspect payload readable after the pane is cleared", () => {
+		const { uiContext } = createContext();
+		const payload = `${INSPECT_PAYLOAD_PREFIX}${JSON.stringify({
+			kind: "pi-subagents.inspect-reply",
+			version: 1,
+			requestId: "req-1",
+			messages: [{ role: "assistant", kind: "text", text: "x".repeat(60_000) }],
+		})}`;
+		assert.equal(payload.length > 60_000, true, "the fixture must exceed the generic widget line bound");
+
+		uiContext.setWidget(INSPECT_WIDGET_KEY, [payload]);
+		assert.deepEqual(uiContext.getWidget(INSPECT_WIDGET_KEY).lines, [payload], "the payload is not cut for the dedicated key");
+		uiContext.setWidget(INSPECT_WIDGET_KEY, undefined);
+		assert.equal(uiContext.getWidget(INSPECT_WIDGET_KEY), null, "retraction clears the visible pane");
+		const capture = uiContext.getWidgetCapture(INSPECT_WIDGET_KEY);
+		assert.ok(capture, "the captured payload survives the retraction");
+		assert.equal(capture.lines[0], payload, "the captured line is byte-identical to the emitted payload");
+		assert.equal(JSON.parse(capture.lines[0].slice(INSPECT_PAYLOAD_PREFIX.length)).requestId, "req-1");
+	});
+
+	it("keeps the generic widget pane bounds unchanged while still capturing updates", () => {
+		const { uiContext } = createContext();
+		const longLine = "y".repeat(10_000);
+		const manyLines = Array.from({ length: 150 }, (_value, index) => `line ${index}`);
+		manyLines[0] = longLine;
+		uiContext.setWidget("activity", manyLines, { placement: "belowEditor" });
+
+		const pane = uiContext.getWidget("activity");
+		assert.equal(pane.lines.length, 100, "the pane still keeps at most 100 lines");
+		assert.equal(pane.lines[0].length, 4000, "generic widget lines keep their 4000-character bound");
+		assert.equal(pane.placement, "belowEditor");
+		const capture = uiContext.getWidgetCapture("activity");
+		assert.equal(capture.lines.length, 100);
+		assert.equal(capture.lines[0].length, 4000, "only the dedicated inspect key gets the larger bound");
+	});
+
+	it("publishes widget updates to listeners and lets them unsubscribe", () => {
+		const { uiContext } = createContext();
+		const seen = [];
+		const unsubscribe = uiContext.onWidgetUpdate((update) => seen.push(update));
+		uiContext.setWidget("activity", ["one"]);
+		uiContext.setWidget("activity", ["two"]);
+		uiContext.setWidget("activity", undefined);
+		uiContext.setWidget("factory", () => ({}));
+		assert.equal(seen.length, 2, "only line emissions are published, not retractions or factories");
+		assert.deepEqual(seen.map((entry) => entry.key), ["activity", "activity"]);
+		assert.deepEqual(seen.map((entry) => entry.lines), [["one"], ["two"]]);
+		assert.equal(seen[0].sequence < seen[1].sequence, true, "emissions carry their order");
+
+		unsubscribe();
+		uiContext.setWidget("activity", ["three"]);
+		assert.equal(seen.length, 2, "an unsubscribed listener receives nothing");
+		assert.equal(uiContext.widgetListenerCount(), 0);
+	});
+
+	it("isolates a throwing listener and bounds the number of readable captures", () => {
+		const { uiContext, logs } = createContext();
+		let calls = 0;
+		uiContext.onWidgetUpdate(() => {
+			calls += 1;
+			throw new Error("listener exploded");
+		});
+		uiContext.onWidgetUpdate(() => {
+			calls += 1;
+		});
+		uiContext.setWidget("activity", ["line"]);
+		assert.equal(calls, 2, "every listener is called even when a previous one threw");
+		assert.match(logs.join("\n"), /a widget update listener threw: listener exploded/);
+
+		for (let index = 0; index < MAX_WIDGET_CAPTURES + 4; index += 1) {
+			uiContext.setWidget(`key-${index}`, [`value ${index}`]);
+		}
+		assert.equal(uiContext.getWidgetCapture("key-0"), null, "the oldest capture is evicted");
+		assert.equal(uiContext.getWidgetCapture(`key-${MAX_WIDGET_CAPTURES + 3}`).lines[0], `value ${MAX_WIDGET_CAPTURES + 3}`);
+		assert.equal(uiContext.getWidgetCapture("never-emitted"), null);
+	});
+
+	it("survives a total capture budget: the newest emission is always readable", () => {
+		const { uiContext } = createContext();
+		const big = "z".repeat(MAX_INSPECT_WIDGET_CHARS - 1);
+		for (let index = 0; index < 6; index += 1) {
+			uiContext.setWidget(INSPECT_WIDGET_KEY, [big]);
+			uiContext.setWidget(`other-${index}`, ["small"]);
+		}
+		const latest = uiContext.getWidgetCapture(INSPECT_WIDGET_KEY);
+		assert.ok(latest, "an emission larger than the remaining budget is never the one dropped");
+		assert.equal(latest.lines[0], big);
 	});
 });

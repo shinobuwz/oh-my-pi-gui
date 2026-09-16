@@ -3,7 +3,7 @@
 This repository implements a local browser GUI for a Pi agent session. The host process
 (`npm start` / `node src/host/main.js`) creates **its own session through Pi's public SDK**
 (`createAgentSession()`), binds a browser-driven `ExtensionUIContext` with
-`session.bindExtensions({ uiContext, mode: "tui" })`, and serves the existing loopback page
+`session.bindExtensions({ uiContext, mode: "rpc" })`, and serves the existing loopback page
 (`src/browser/*`). Chat, standard dialogs, model/thinking, session status and the read-only
 pi-subagents panel are all driven from the browser; the terminal is only needed to start and
 stop the host.
@@ -42,9 +42,15 @@ node src/host/main.js --help       # usage and the SDK resolution order
   handlers may raise dialogs (project trust, login, extension prompts) that can only be
   answered from the page. `Pi GUI host listening: <url>` is printed as soon as the page is
   reachable; `Pi GUI host ready` then reports the bound session.
-- The host binds `bindExtensions({ uiContext, mode: "tui" })`, so interaction-gated
-  extensions are enabled while `custom` stays explicitly unsupported. Pi's own runner keeps
-  emitting `ui_prompt_start`/`ui_prompt_end`; the host fabricates no events.
+- The host binds `bindExtensions({ uiContext, mode: "rpc" })`. `rpc` keeps every dialog
+  capability (`confirm`/`select`/`input`/`editor` still answer in the browser — Pi's contract
+  gives rpc the same dialog surface as tui, and `hasUI()` only depends on a UI context being
+  provided) and it unlocks pi-subagents' host inspect command `/subagents-inspect-rpc`, which
+  refuses to emit its structured reply on tui surfaces. The accepted cost is the opposite
+  group: an extension that gates itself on `ctx.mode !== "tui"` (questionnaire, Pi's llama
+  extension) takes its non-interactive branch and reports its own failure text, which the host
+  renders as-is. `ctx.ui.custom` stays explicitly unsupported either way. Pi's own runner
+  keeps emitting `ui_prompt_start`/`ui_prompt_end`; the host fabricates no events.
 - On SIGINT/SIGTERM (and any exit path) pending dialogs end with their non-approval result,
   the listener closes, the URL file is removed and the session handle is released. There is
   **no in-place reload**: the page's reload request is refused with `reload_unavailable`;
@@ -203,6 +209,42 @@ delays startup.
   `lastUpdate` is never forwarded) and secret shapes (`Bearer …`, `key=`/`token=`/`secret=`/
   `password=`) are redacted while ordinary transcript paths stay readable. Raw task fields,
   artifact paths and artifact access are never exposed.
+- **Structured inspection (host inspect channel).** The host can ask the extension for the
+  *structured* view of one async run — the child's own Pi session messages (`text`/`toolCall`/
+  `toolResult` with tool names and failure flags), the delegated task and the final output —
+  instead of the run-level transcript tail. It uses pi-subagents' own host protocol:
+  `session.prompt("/subagents-inspect-rpc <requestId> <asyncId> [childId] [--lines N]")`,
+  which `prompt()` executes as an extension command (no model turn, no chat message, no
+  session history write), and captures the `PI_SUBAGENT_INSPECT_JSON:` widget payload from the
+  dedicated `subagent-inspect` key, correlating it by the host-generated `requestId`. This is
+  the reason for `mode: "rpc"`: the command's handler refuses to emit on `tui` surfaces.
+- **Inspection identity, bounds and failures.** Only an async id from the current generation's
+  successful status response can be inspected (a fleet display key never can), a `childId` must
+  be a node id the current snapshot lists (a child without an id is refused, never guessed),
+  and only one inspection per generation may be in flight. The command is bounded by a 5 s
+  deadline (single attempt, no retry storm), the run id is validated before anything is sent,
+  and the request never disturbs a chat turn that is streaming. Failure codes stay explicit:
+  `not_found`(404) / `foreign_session`(403) / `stale`(409) / `no_active_session`(503) /
+  `invalid_request`(400) from the extension, `inspect_failed`(502) for an `internal` or unknown
+  extension code, a malformed payload, a payload correlated to another request id, or an answer
+  without a payload, `inspect_timeout`(504) for the deadline, `inspect_busy`(409) for a second
+  concurrent request, and `inspect_unavailable`/`commands_unavailable`(503) when the session
+  cannot confirm the command is registered — in that case the host refuses to prompt instead of
+  risking the text becoming a model turn.
+- **Inspection projection.** The reply is re-projected (`src/core/inspect-reply.js`), never
+  trusted as-is: ≤ 200 messages, ≤ 1000 characters per message text, `task` ≤ 2000,
+  `finalOutput` ≤ 8000, only `role`/`kind`/`name`/`isError`/`text` per message, plus
+  `status`/`label`/`childId`/`asyncId` and a normalized `truncated { task, messages,
+  finalOutput }` (an extension-reported drop count and this projection's own drops are added
+  together, so the page can say "earlier messages were dropped"). No host path field is
+  projected, credential-shaped text and sensitive path fields go through the shared redaction,
+  and the extension's bounded error message is preserved verbatim.
+- **Known limits of the structured view.** Thinking text and full tool arguments/results are
+  not part of the payload (the extension sends previews, bounded per message), the payload is
+  capped at 200 messages / 1000 characters / 64 KB by the extension, and a run whose child
+  session file is unreadable (or whose artifacts are gone) answers with the extension's own
+  bounded error; the page then shows that error and the run-level **View transcript** text tail
+  remains available as the fallback — no messages are invented.
 - **Honest unavailability.** `ready-empty` (no work), `error` (owner refused),
   `timeout`/`unavailable` (no RPC owner — the case where pi-subagents is not installed) and
   unattached (the host shape has no extension-bus exports) stay visibly distinct; the panel
@@ -304,7 +346,13 @@ delays startup.
 ## Questionnaire and custom components
 
 The questionnaire is deliberately **not** supported in the first version; a structured form
-is a scope decision, not a pending bug fix.
+is a scope decision, not a pending bug fix. Since the host binds `mode: "rpc"`, the
+`questionnaire` extension itself now refuses its interactive branch — it reports
+*“UI not available (running in non-interactive mode)”* — and the host shows that failure text
+exactly as the extension produced it, without hanging and without a fabricated form. This is
+the accepted cost of the mode switch (see the Start section); it replaces the earlier
+“the host bound `tui` and questionnaire still failed on `custom`” situation with an explicit,
+extension-owned refusal.
 
 `ctx.ui.custom(factory)` hands over a terminal component whose closure owns its own data
 (questions, options, answers), so the browser cannot read or answer it. What happens instead:
@@ -321,7 +369,8 @@ This is covered by `test/host-ui-context.test.js` (the `custom` member fails wit
 its factory and creates an unanswerable, 409-rejected browser notice). The previous
 read-only diagnostic against the installed questionnaire was removed together with the
 private-seam route it drove; final real-browser acceptance still includes triggering
-`ctx.ui.custom` (for example the `questionnaire` tool).
+`ctx.ui.custom` (for example the `questionnaire` tool) and confirming that a mode-gated
+extension degrades with its own message instead of hanging.
 
 ## Requirements
 
@@ -346,7 +395,8 @@ PI_GUI_SMOKE=1 node --test test/sdk-smoke.test.js
 The second smoke case also needs pi-subagents installed at
 `~/.pi/agent/npm/node_modules/pi-subagents/index.ts` (override with
 `PI_GUI_SMOKE_SUBAGENTS_PATH`) and a shell where `PI_SUBAGENT_CHILD` is not set; it is skipped
-with that exact reason otherwise.
+with that exact reason otherwise. The third case drives the same real inspect command and has
+the same two requirements.
 
 Test inventory and the real-vs-stub boundary:
 
@@ -359,23 +409,24 @@ Test inventory and the real-vs-stub boundary:
 | `test/chat-server.test.js` | authenticated generation-bound chat state/message/Stop routes and cross-site/stale rejection | real HTTP against the real server with a session-control fixture |
 | `test/model-server.test.js` | authenticated model/thinking routes, exact candidate-key forwarding, generation and Origin rejection | real HTTP against the real server |
 | `test/model-page.test.js` | candidate selectors, explicit submissions, effective-state and rejection feedback | strict fake DOM |
-| `test/subagents-server.test.js` | authenticated read-only details/refresh routes, exact body fields, generation and Origin rejection | real HTTP against the real server with a session-control fixture |
+| `test/subagents-server.test.js` | authenticated read-only details/refresh routes plus `POST /api/subagents/inspect` (exact body allow-list, id/childId/lines validation, generation and Origin rejection, extension error-code status mapping, unattached 503, and no host path in the response) | real HTTP against the real server with a session-control fixture |
 | `test/subagents-page.test.js` | bounded fleet/async rendering, manual transcript detail, text-only output and visibly distinct timeout/omitted states | strict fake DOM |
 | `test/git-status.test.js` | the shared Git/usage implementation (`src/core/git-status.js`): active-branch usage aggregation, context null/known values, bounded cwd, injected Git normal/unborn/detached/non-repository handling, event refresh and generation disposal | public-API-shaped unit fixtures |
-| `test/subagents-rpc.test.js` | the shared read-only pi-subagents RPC consumer (`src/core/subagents-rpc.js`): correlated public ping/status RPC, generation-scoped fleet/async projection, identity separation, fixed transcript params, timeout/error distinction and redaction | public event-bus fixture |
+| `test/subagents-rpc.test.js` | the shared read-only pi-subagents RPC consumer (`src/core/subagents-rpc.js`): correlated public ping/status RPC, generation-scoped fleet/async projection, identity separation, fixed transcript params, timeout/error distinction and redaction; plus the structured inspection path (retained-id/child-node allowlist, exact extension command text, single in-flight slot, bounded timeout, mapping of every extension error code and of `internal`/unknown codes, refusal of malformed or uncorrelated payloads and of an unavailable command channel) | public event-bus fixture with an injected inspect transport |
+| `test/inspect-reply.test.js` | the pure structured-reply parser and projection (`src/core/inspect-reply.js`): envelope validation (kind/version/requestId), rejection reasons for foreign, malformed and mismatched payloads, message/task/finalOutput re-bounding, `truncated` normalization, dropped-entry counting, credential and sensitive-path-field redaction, and the bounded payload/line helpers | pure unit tests, no session |
 | `test/host-sdk-loader.test.js` | SDK discovery (env overrides, global npm roots, `npm root -g`, fail-closed explicit overrides) and export-shape validation, plus the repository portability guards (no hardcoded personal installation paths, no import of the bundled CLI entry) | temporary fixture roots, injected `npm root -g`; no installed package, no network |
 | `test/host-session.test.js` | `startHost` against a fake SDK: session creation, chat/model/status attach/detach, fail-closed startup, resource release on close and the synchronous exit path | fake `AgentSession` |
-| `test/host-ui-context.test.js` | the browser-driven `ctx.ui`: dialog kinds, Pi-compatible return types, non-approval exits, explicit `custom` failure with an unanswerable notice, notify/setStatus recording and the safe no-op downgrades | `RequestStore` + fake dialog consumers |
+| `test/host-ui-context.test.js` | the browser-driven `ctx.ui`: dialog kinds, Pi-compatible return types, non-approval exits, explicit `custom` failure with an unanswerable notice, notify/setStatus recording, the safe no-op downgrades, and the bounded widget-capture seam (payload survives the emit-then-retract, generic pane limits unchanged, listener isolation/bounds) | `RequestStore` + fake dialog consumers |
 | `test/host-chat.test.js` | SDK chat adapter on a fake session: browser contract fields, idle/streaming/unknown phase migration, revision + `since` protocol, live-vs-canonical reconciliation (including the persisted toolResult case), delivery mapping with the exact `prompt()` options, slash-command allowlist and fail-closed refusal, stop → `abort()`, `lastError` after acceptance, redaction and history-failure reporting | public-API-shaped `AgentSession` fixture; no model call |
 | `test/host-chat-server.test.js` | real HTTP `/api/message`, `/api/stop` and `/api/state` round trips through the host bridge with a fake session: idle normal, streaming steer/follow-up, incremental state, stop; rejection paths (missing/wrong token, wrong Origin, cross-site `Sec-Fetch-Site`, extra fields, stale generation, unknown slash command, unknown delivery, oversized text) and released-session refusal | real loopback HTTP server, fake `AgentSession` |
 | `test/host-model.test.js` | SDK model/thinking adapter on a fake session: scoped/available candidate allowlist and deduplication, sanitized snapshots (no credentials/baseUrl/headers), unknown-key refusal before `setModel()`, effective model/level read-back, missing-auth throw and `false` return keeping the previous model, thinking clamp echo, session-only calls (no `persist`) and disposal | public-API-shaped `AgentSession` fixture; no model call |
 | `test/host-status.test.js` | SDK status adapter on a fake session: cwd reader plus explicit fallback, active-branch usage aggregation with an unknown total when a component is missing, context usage/window, bounded Git argv (`shell: false`, timeout, maxBuffer) with reason-code-only failures, event refresh, disposal and late-callback rejection | public-API-shaped `AgentSession` fixture with an injected `execFile`; no real repository or subprocess |
-| `test/host-subagents.test.js` | the host-owned extension-bus channel (same bus, default discovery, explicit reasons instead of a private seam), the read-only adapter over a fake pi-subagents owner (bounded fleet/async lists with public time fields, fleet-key-vs-run-id separation, allowlist-only detail with the fixed transcript params, empty/error/timeout distinction, redaction with ordinary paths preserved, body validation, hint-burst coalescing, no writes after dispose) and the lifecycle attach/detach plus `not_attached` contract | fake extension bus + fake RPC owner; no model call, no real subagent, no installed package |
-| `test/host-subagents-server.test.js` | real HTTP `/api/state` `subagents` section plus `POST /api/subagents/details` and `POST /api/subagents/refresh` through the host: bounded projection, exact transcript params, redaction, refresh round trip, hint coalescing, unavailable owner, unattached host shape with a logged reason, resource-load failure refusing startup, and the existing token/Host/Origin/extra-field/stale/method rejections plus no-write-after-shutdown | real loopback HTTP server, fake SDK bus and fake RPC owner; no model call, no real subagent |
+| `test/host-subagents.test.js` | the host-owned extension-bus channel (same bus, default discovery, explicit reasons instead of a private seam), the read-only adapter over a fake pi-subagents owner (bounded fleet/async lists with public time fields, fleet-key-vs-run-id separation, allowlist-only detail with the fixed transcript params, empty/error/timeout distinction, redaction with ordinary paths preserved, body validation, hint-burst coalescing, no writes after dispose), the inspect transport over the real UI-context capture seam (command-catalog check before any prompt, emit-then-retract capture, request-id correlation, timeout/subscription release, missing/`false`/throwing command answers) and the lifecycle attach/detach plus `not_attached` contract | fake extension bus + fake RPC owner + real UI context; no model call, no real subagent, no installed package |
+| `test/host-subagents-server.test.js` | real HTTP `/api/state` `subagents` section plus `POST /api/subagents/details`, `POST /api/subagents/refresh` and `POST /api/subagents/inspect` through the host: bounded projection, exact transcript params, redaction, refresh round trip, hint coalescing, unavailable owner, unattached host shape with a logged reason, resource-load failure refusing startup, the existing token/Host/Origin/extra-field/stale/method rejections, no-write-after-shutdown, and the structured inspection round trip (command prompt through the session, no chat history or model call, timeout while streaming leaves the turn untouched, and honest error mapping for unavailable commands, missing payloads and extension error replies) | real loopback HTTP server, fake SDK bus, fake RPC owner and a session double that speaks the real inspect protocol through the host's own UI context; no model call, no real subagent |
 | `test/host-controls-server.test.js` | real HTTP `/api/model`, `/api/thinking` and `/api/state` round trips through the host bridge with a fake session and an injected Git double: candidate-key forwarding, effective model/level echo, clamp echo, activation failure keeping the previous model, plus the existing token/Origin/body/generation/method rejections and the serialized-payload leakage check | real loopback HTTP server, fake `AgentSession` |
 | `test/host-server.test.js` | real HTTP `/api/state` + `/api/answer` dialogs, unauthenticated/cross-site/malformed answer rejection, the explicit `reload_unavailable` refusal, the served-page dialog/chat snapshot render, and listener release with non-approval dialogs on close | real loopback HTTP server, fake SDK and Git double |
 | `test/host-main.test.js` | launcher argument parsing, `--help`, exit codes, fail-closed startup reporting, signal-driven shutdown, synchronous `exit` cleanup and the direct `node src/host/main.js` entry | injected host starter plus a real subprocess for `--help` / missing-SDK fail-closed |
-| `test/sdk-smoke.test.js` | opt-in against the installed SDK: our UI context bound in `tui` mode, a real extension calling it, the public chat/model/status accessors on a real session, and the real pi-subagents owner answering the read-only ping/status over the host-owned bus | real installed SDK, temporary session directory, no model call; skipped unless `PI_GUI_SMOKE=1` |
+| `test/sdk-smoke.test.js` | opt-in against the installed SDK: our UI context bound in `rpc` mode with a dialog still answerable in the browser, a real extension calling it, the public chat/model/status accessors on a real session, the real pi-subagents owner answering the read-only ping/status over the host-owned bus, and the real `subagents-inspect-rpc` command answering with a captured structured payload (an unknown async id, so no subagent and no model call) | real installed SDK, temporary session directory, no model call; skipped unless `PI_GUI_SMOKE=1` (and outside a `PI_SUBAGENT_CHILD=1` process for the pi-subagents cases) |
 
 ### Still unverified — requires a human at a real terminal and browser
 

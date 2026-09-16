@@ -2,7 +2,7 @@
  * Recording fake for the public SDK entry points the host uses.
  *
  * The host must create a new session for the requested cwd, bind our UI context with
- * `mode: "tui"`, drive the browser chat through the public `AgentSession` surface
+ * `mode: "rpc"`, drive the browser chat through the public `AgentSession` surface
  * (`prompt`/`abort`/`subscribe`/`isIdle`/`isStreaming`/`sessionManager`), drive the
  * model/thinking controls through the public `AgentSession` surface
  * (`model`/`thinkingLevel`/`scopedModels`/`modelRuntime.getAvailableSnapshot()`/

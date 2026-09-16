@@ -19,7 +19,13 @@
  *   smallest safe behaviour: values that can be kept safely are kept in host memory and
  *   logged, everything else degrades to a safe no-op with an explicit one-time log. No
  *   member throws an uncaught exception and none is silently ignored.
+ * - `setWidget` additionally records a bounded *widget update event* per key, so the host
+ *   can read back the payload an extension emitted even when the extension retracts the
+ *   widget immediately afterwards (pi-subagents' `subagent-inspect` emit-then-retract is
+ *   the reason this seam exists). The visible widget pane keeps its own, unchanged limits.
  */
+
+import { INSPECT_WIDGET_KEY } from "../core/inspect-reply.js";
 
 /** Same unsupported wording as the previous browser bridge, so the semantics do not change. */
 export const CUSTOM_UNSUPPORTED_MESSAGE =
@@ -34,7 +40,8 @@ export const INACTIVE_MESSAGE =
 export const UI_SUPPORT_SUMMARY =
 	"confirm/select/input/editor are answered in the browser; ctx.ui.custom fails explicitly with a browser-visible, unanswerable notice; " +
 	"notify and setStatus are recorded in host memory and logged on the host terminal; " +
-	"TUI-only members (widgets, footer/header, terminal input, editor components, theme switching, tool-expansion state) degrade to a safe no-op with an explicit one-time log.";
+	"widget lines are captured in host memory for the structured inspect channel while the visible pane stays unimplemented; " +
+	"TUI-only members (footer/header, terminal input, editor components, theme switching, tool-expansion state) degrade to a safe no-op with an explicit one-time log.";
 
 /** Members implemented as blocking browser dialogs. */
 export const UI_DIALOG_MEMBERS = Object.freeze(["confirm", "select", "input", "editor"]);
@@ -75,6 +82,17 @@ const MAX_STATUS_KEYS = 50;
 const MAX_WIDGETS = 20;
 const MAX_WIDGET_LINES = 100;
 const MAX_MESSAGE_CHARS = 4000;
+/**
+ * One widget line of the structured inspect channel must survive capture intact: the
+ * serialized `pi-subagents.inspect-reply` is bounded at 64KB by the extension, so an 80KB
+ * line bound keeps it whole while still bounding host memory. The generic widget pane
+ * bound (`MAX_MESSAGE_CHARS`) is deliberately unchanged.
+ */
+export const MAX_INSPECT_WIDGET_CHARS = 80 * 1024;
+/** Distinct widget keys whose last emission is readable from the host. */
+export const MAX_WIDGET_CAPTURES = 8;
+/** Total characters kept across those captures; the oldest key is dropped first. */
+export const MAX_WIDGET_CAPTURE_CHARS = 256 * 1024;
 const MAX_STATUS_CHARS = 500;
 const MAX_TITLE_CHARS = 200;
 const MAX_EDITOR_CHARS = 64 * 1024;
@@ -140,6 +158,48 @@ export function createBrowserUIContext({ store, logger = () => {} } = {}) {
 	const toolsExpanded = { value: false };
 	const editorDraft = { text: "" };
 	const degraded = new Set();
+	/** Last emitted widget lines per key, in emission order; bounded by count and total size. */
+	const widgetCaptures = new Map();
+	const widgetListeners = new Set();
+	let widgetCaptureChars = 0;
+	let widgetSequence = 0;
+
+	function capturedChars(capture) {
+		return capture.lines.reduce((total, line) => total + line.length, 0);
+	}
+
+	/**
+	 * Record one widget emission. The value is kept even when the extension retracts the
+	 * widget in the next call, because callers such as the pi-subagents inspect channel use
+	 * emit-then-retract to deliver one payload without leaving visible state behind.
+	 */
+	function captureWidget(name, lines) {
+		widgetSequence += 1;
+		const previous = widgetCaptures.get(name);
+		if (previous) widgetCaptureChars -= capturedChars(previous);
+		const capture = { key: name, lines, sequence: widgetSequence };
+		widgetCaptures.delete(name);
+		widgetCaptures.set(name, capture);
+		widgetCaptureChars += capturedChars(capture);
+		while (widgetCaptureChars > MAX_WIDGET_CAPTURE_CHARS && widgetCaptures.size > 1) {
+			const oldestKey = widgetCaptures.keys().next().value;
+			widgetCaptureChars -= capturedChars(widgetCaptures.get(oldestKey));
+			widgetCaptures.delete(oldestKey);
+		}
+		while (widgetCaptures.size > MAX_WIDGET_CAPTURES) {
+			const oldestKey = widgetCaptures.keys().next().value;
+			widgetCaptureChars -= capturedChars(widgetCaptures.get(oldestKey));
+			widgetCaptures.delete(oldestKey);
+		}
+		for (const listener of [...widgetListeners]) {
+			try {
+				listener({ key: capture.key, lines: [...capture.lines], sequence: capture.sequence });
+			} catch (error) {
+				// A listener that throws must not break the extension call that emitted the widget.
+				logger(`browser UI: a widget update listener threw: ${safeText(error instanceof Error ? error.message : error).slice(0, 200)}`);
+			}
+		}
+	}
 
 	function degrade(member, detail) {
 		if (degraded.has(member)) {
@@ -228,16 +288,21 @@ export function createBrowserUIContext({ store, logger = () => {} } = {}) {
 			const name = bounded(key, 120);
 			if (content === undefined || Array.isArray(content)) {
 				if (content === undefined) {
+					// Retraction clears the visible pane only; the captured emission stays readable
+					// so an emit-then-retract payload is not lost to the correlation seam.
 					widgets.delete(name);
 				} else {
+					const lineLimit = name === INSPECT_WIDGET_KEY ? MAX_INSPECT_WIDGET_CHARS : MAX_MESSAGE_CHARS;
+					const lines = content.slice(0, MAX_WIDGET_LINES).map((line) => bounded(line, lineLimit));
 					widgets.set(name, {
-						lines: content.slice(0, MAX_WIDGET_LINES).map((line) => bounded(line, MAX_MESSAGE_CHARS)),
+						lines,
 						placement: options?.placement ?? "aboveEditor",
 					});
 					while (widgets.size > MAX_WIDGETS) {
 						const oldest = widgets.keys().next().value;
 						widgets.delete(oldest);
 					}
+					captureWidget(name, lines);
 				}
 				degrade("setWidget", "widget lines are kept in host memory only; the page has no widget pane");
 			} else {
@@ -317,6 +382,30 @@ export function createBrowserUIContext({ store, logger = () => {} } = {}) {
 			const widget = widgets.get(bounded(key, 120));
 			return widget ? { lines: [...widget.lines], placement: widget.placement } : null;
 		},
+		/**
+		 * Read the most recent widget emission for one key (bounded, defensive copy); `null`
+		 * means "this key never emitted widget lines", never "no payload".
+		 */
+		getWidgetCapture: (key) => {
+			const capture = widgetCaptures.get(bounded(key, 120));
+			return capture ? { key: capture.key, lines: [...capture.lines], sequence: capture.sequence } : null;
+		},
+		/**
+		 * Observe widget emissions (not state): the listener receives every `setWidget` call
+		 * that carries lines, including keys whose visible pane is later retracted. Returns an
+		 * unsubscribe function; a throwing listener is logged and never breaks the extension.
+		 */
+		onWidgetUpdate: (listener) => {
+			if (typeof listener !== "function") {
+				return () => {};
+			}
+			widgetListeners.add(listener);
+			return () => {
+				widgetListeners.delete(listener);
+			};
+		},
+		/** Number of live widget-update listeners (host introspection only). */
+		widgetListenerCount: () => widgetListeners.size,
 		getWorkingState: () => ({ ...working }),
 		getEditorDraft: () => editorDraft.text,
 		getTerminalTitle: () => terminalTitle,

@@ -204,6 +204,24 @@ export class FakeElement {
 		this.listeners.set(type, list);
 	}
 
+	/**
+	 * Attribute support for the ARIA contract only: the page sets `role`, `aria-expanded`
+	 * and `aria-controls`, which have no IDL property in the stub. Values are stored
+	 * verbatim (never parsed), exactly like the browser's setAttribute.
+	 */
+	setAttribute(name, value) {
+		this.attributes[String(name)] = String(value);
+	}
+
+	getAttribute(name) {
+		const value = this.attributes[String(name)];
+		return value === undefined ? null : value;
+	}
+
+	removeAttribute(name) {
+		delete this.attributes[String(name)];
+	}
+
 	/** Test helper: dispatch an event and return the handlers' results. */
 	dispatch(type) {
 		const event = { type, preventDefault() {}, stopPropagation() {} };

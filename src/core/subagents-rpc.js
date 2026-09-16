@@ -8,12 +8,34 @@
  *
  * It talks only to the public in-process event-bus contract. It never imports
  * pi-subagents, starts a child, reads an artifact, or treats a fleet key as an async
- * run id. The browser receives a bounded projection of the public fleet/status DTOs and
- * can request a transcript only for an async id retained by the current generation's
- * successful status response.
+ * run id. The browser receives a bounded projection of the public fleet/status DTOs, can
+ * request a transcript only for an async id retained by the current generation's
+ * successful status response, and can ask for the *structured* view of one retained run
+ * (or of one child node of the current snapshot) through the extension's own
+ * `/subagents-inspect-rpc` command, whose widget payload is correlated by request id and
+ * projected by `src/core/inspect-reply.js`.
  */
 
 import { randomUUID as nodeRandomUUID } from "node:crypto";
+
+import {
+	INSPECT_COMMAND_NAME,
+	INSPECT_LIMITS,
+	boundedInspectLines,
+	isValidInspectRequestId,
+	parseInspectWidgetLine,
+	projectInspectReply,
+} from "./inspect-reply.js";
+import {
+	PATH_LINE,
+	isRecord,
+	redactSecretText,
+	redactSensitivePathFields,
+	safeCode as sharedSafeCode,
+	safeText,
+	stripDetailControls,
+	truncate,
+} from "./redaction.js";
 
 export const SUBAGENT_RPC_REQUEST_EVENT = "subagents:rpc:v1:request";
 export const SUBAGENT_RPC_REPLY_EVENT_PREFIX = "subagents:rpc:v1:reply:";
@@ -48,61 +70,56 @@ export const SUBAGENT_LIMITS = Object.freeze({
 	maxCodeChars: 96,
 	maxErrorChars: 512,
 	maxDetailTextChars: 32 * 1024,
+	/** Default deadline for one structured inspection round trip. */
+	inspectTimeoutMs: 5000,
+	maxInspectChildIdChars: 256,
 });
 
 /** Fixed transcript tail passed to every targeted status request. */
 export const SUBAGENT_DETAIL_LINES = 80;
 
+/** Structured-inspection body allow-list (the only fields `/api/subagents/inspect` accepts). */
+export const SUBAGENT_INSPECT_BODY_KEYS = Object.freeze(["generation", "id", "childId", "lines"]);
+
+const INSPECT_BODY_KEYS = new Set(SUBAGENT_INSPECT_BODY_KEYS);
+
+/**
+ * pi-subagents error codes the browser can act on, mapped to the HTTP status the page
+ * receives. `internal` and every unknown code become `inspect_failed` (502) with the
+ * extension's bounded message preserved.
+ */
+const INSPECT_ERROR_STATUS = Object.freeze({
+	invalid_request: 400,
+	foreign_session: 403,
+	not_found: 404,
+	stale: 409,
+	no_active_session: 503,
+});
+
+/**
+ * Failure codes this bridge raises itself (no browser-actionable extension code): the
+ * command is unavailable, another inspection is already in flight, the extension did not
+ * answer in time, or the captured reply could not be trusted.
+ */
+export const SUBAGENT_INSPECT_FAILURES = Object.freeze({
+	unavailable: [503, "inspect_unavailable"],
+	commandsUnavailable: [503, "commands_unavailable"],
+	busy: [409, "inspect_busy"],
+	timeout: [504, "inspect_timeout"],
+	failed: [502, "inspect_failed"],
+});
+
 const FLEET_TOKEN_FIELDS = Object.freeze(["input", "output", "total"]);
 const OUTPUT_STATES = new Set(["present", "absent", "unknown"]);
-const BEARER_SECRET = /\bBearer\s+[^\s"'`<>,;)}\]]+/gi;
-const SECRET_ASSIGNMENT = /(\b(?:api[-_]?key|access[-_]?key|authorization|credential|private[-_]?key|refresh[-_]?token|key|token|secret|password)\b["']?\s*[:=]\s*)(?:(['"])[^'"\r\n]*\2|([^\s,;}\]\)]+))/gi;
-const PATH_LINE = /^\s*(?:async(?:Dir| directory)?|session(?:File| path)?|output(?:File| path)?|cwd|working directory|artifact(?: path)?|events?|logs?|result(?: path)?|file|directory|path)\s*:/i;
-const SENSITIVE_PATH_FIELD = /("?(?:asyncDir|sessionFile|transcriptPath|artifactPath|outputFile|eventsPath|logPath|resultPath|cwd)"?\s*[:=]\s*)"?[^,}\r\n]+"?/gi;
-const PATH_TOKEN = /(?:[A-Za-z]:[\\/][^\s"'`<>]+|\\\\[^\s"'`<>]+|(?:^|[\s([{"'])\/(?:Users|home|tmp|var|private|workspace|workspaces|agent|async-subagent-runs)[^\s"'`<>]*)/gi;
 
-function isRecord(value) {
-	return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
-function truncate(value, maxChars) {
-	if (value.length <= maxChars) return value;
-	if (maxChars <= 1) return value.slice(0, Math.max(0, maxChars));
-	return `${value.slice(0, maxChars - 1)}…`;
-}
-
-function stripControls(value) {
-	return value.replace(/[\u0000-\u001f\u007f]/g, " ");
-}
-
-function stripDetailControls(value) {
-	// Keep line boundaries so sensitive artifact/session lines can be dropped as
-	// whole records; all other control bytes become harmless spaces.
-	return value.replace(/[\u0000-\u0009\u000b\u000c\u000e-\u001f\u007f]/g, " ");
-}
-
-function redactSecretText(value) {
-	return value
-		.replace(BEARER_SECRET, "Bearer [redacted]")
-		.replace(SECRET_ASSIGNMENT, (_match, prefix, quote) => `${prefix}${quote ? `${quote}[redacted]${quote}` : "[redacted]"}`);
-}
-
-function redactPathTokens(value) {
-	return value.replace(PATH_TOKEN, "[path omitted]");
-}
-
-function safeText(value, maxChars, { redactPaths = true } = {}) {
-	if (typeof value !== "string" || value.length === 0) return undefined;
-	const normalized = stripControls(value);
-	const redacted = redactPaths ? redactPathTokens(normalized) : normalized;
-	const trimmed = redacted.trim();
-	return trimmed ? truncate(trimmed, maxChars) : undefined;
-}
-
+/** The shared redaction helper, bounded by this module's own code limit. */
 function safeCode(value) {
-	if (typeof value !== "string" && typeof value !== "number") return "rpc_error";
-	const code = String(value).replace(/[^A-Za-z0-9_.-]/g, "_");
-	return truncate(code || "rpc_error", SUBAGENT_LIMITS.maxCodeChars);
+	return sharedSafeCode(value, { fallback: "rpc_error", maxChars: SUBAGENT_LIMITS.maxCodeChars });
+}
+
+/** Bounded, path-free text for a thrown value (used in failure messages only). */
+function errorText(error) {
+	return error instanceof Error ? error.message : String(error);
 }
 
 function safeTime(value) {
@@ -298,9 +315,9 @@ function projectResultSummaries(value) {
 
 function detailText(value) {
 	if (typeof value !== "string") return "";
-	const raw = stripDetailControls(value)
-		.slice(0, SUBAGENT_LIMITS.maxDetailTextChars * 2)
-		.replace(SENSITIVE_PATH_FIELD, "$1[path omitted]");
+	const raw = redactSensitivePathFields(
+		stripDetailControls(value).slice(0, SUBAGENT_LIMITS.maxDetailTextChars * 2),
+	);
 	const lines = [];
 	for (const line of raw.split(/\r?\n/)) {
 		if (PATH_LINE.test(line)) continue;
@@ -354,6 +371,10 @@ export class SubagentsBridge {
 	#pendingReadyRecovery = false;
 	#inFlight = null;
 	#recoveryInFlight = null;
+	#inspectRunner = null;
+	#inspectTimeoutMs = SUBAGENT_LIMITS.inspectTimeoutMs;
+	#inspectInFlight = false;
+	#inspectAbort = null;
 	#initial = null;
 	#initialBusy = true;
 
@@ -373,6 +394,8 @@ export class SubagentsBridge {
 		randomUUID = nodeRandomUUID,
 		setTimeout: setTimer = globalThis.setTimeout,
 		clearTimeout: clearTimer = globalThis.clearTimeout,
+		inspectRunner = null,
+		inspectTimeoutMs = undefined,
 	} = {}) {
 		this.#events = eventBus ?? events;
 		this.#context = ctx ?? context;
@@ -389,6 +412,10 @@ export class SubagentsBridge {
 		this.#randomUUID = typeof randomUUID === "function" ? randomUUID : nodeRandomUUID;
 		this.#setTimeout = typeof setTimer === "function" ? setTimer : globalThis.setTimeout;
 		this.#clearTimeout = typeof clearTimer === "function" ? clearTimer : globalThis.clearTimeout;
+		this.#inspectRunner = typeof inspectRunner === "function" ? inspectRunner : null;
+		this.#inspectTimeoutMs = Number.isFinite(inspectTimeoutMs) && inspectTimeoutMs > 0
+			? Math.min(30_000, Math.floor(inspectTimeoutMs))
+			: SUBAGENT_LIMITS.inspectTimeoutMs;
 		this.#seedSnapshot(retainedSnapshot ?? initialSnapshot);
 		const initial = this.#initialize();
 		this.#initial = initial.finally(() => {
@@ -404,6 +431,11 @@ export class SubagentsBridge {
 
 	get detailLines() {
 		return SUBAGENT_DETAIL_LINES;
+	}
+
+	/** Bounded deadline for one structured inspection round trip. */
+	get inspectTimeoutMs() {
+		return this.#inspectTimeoutMs;
 	}
 
 	/** Promise for the initial ping -> untargeted status bind. */
@@ -576,6 +608,208 @@ export class SubagentsBridge {
 		});
 	}
 
+	/**
+	 * Read the *structured* view of one retained async run (or of one child node of the
+	 * current snapshot) through the extension's own host command.
+	 *
+	 * The command is executed by `session.prompt()`'s extension-command dispatch, so it
+	 * produces no model turn and writes no chat history; the reply arrives as one captured
+	 * `subagent-inspect` widget payload and is correlated by this call's request id. Only
+	 * ids the current generation's successful status response returned are accepted, exactly
+	 * like `detail()`: a fleet display key, an unknown child node, an unusable line count or
+	 * a second inspection of the same generation is refused before anything reaches the
+	 * session. The deadline, the single in-flight slot and every failure code are explicit —
+	 * a timeout never retries and never touches an in-flight chat turn.
+	 *
+	 * @param {number} expectedGeneration generation the browser believes is current
+	 * @param {{ generation?: number, id?: string, childId?: string, lines?: number }} [body]
+	 * @returns {Promise<{ ok: true, generation: number, inspect: object } | { ok: false, status: number, code: string, message: string }>}
+	 */
+	inspect(expectedGeneration, body = {}) {
+		if (!this.#active || expectedGeneration !== this.#generation) {
+			return Promise.resolve(failure("stale_generation", 409, "stale_generation", "the browser session generation is no longer current"));
+		}
+		if (!isRecord(body) || Object.keys(body).some((key) => !INSPECT_BODY_KEYS.has(key))) {
+			return Promise.resolve(failure("invalid_body", 400, "invalid_body", "subagent inspection only accepts the current generation, an async run id, an optional child id and an optional line count"));
+		}
+		if (body.generation !== this.#generation) {
+			return Promise.resolve(failure("stale_generation", 409, "stale_generation", "the browser session generation is no longer current"));
+		}
+		const id = safeText(body.id, SUBAGENT_LIMITS.maxKeyChars, { redactPaths: false });
+		if (!id || !this.#asyncIds.has(id)) {
+			return Promise.resolve(failure("not_found", 404, "not_found", "the requested async run is not in the current status allowlist"));
+		}
+		let childId;
+		if (body.childId !== undefined) {
+			childId = safeText(body.childId, SUBAGENT_LIMITS.maxInspectChildIdChars, { redactPaths: false });
+			if (!childId || childId !== body.childId) {
+				return Promise.resolve(failure("invalid_body", 400, "invalid_body", "a child node id must be a non-empty, bounded node id"));
+			}
+			if (!this.#hasChildId(id, childId)) {
+				return Promise.resolve(failure("not_found", 404, "not_found", "the requested child node is not in the current async status snapshot"));
+			}
+		}
+		let lines;
+		if (body.lines !== undefined) {
+			lines = boundedInspectLines(body.lines);
+			if (lines === undefined) {
+				return Promise.resolve(failure(
+					"invalid_body",
+					400,
+					"invalid_body",
+					`an inspection line count must be an integer between ${INSPECT_LIMITS.minLines} and ${INSPECT_LIMITS.maxLines}`,
+				));
+			}
+		}
+		if (typeof this.#inspectRunner !== "function") {
+			return Promise.resolve(this.#inspectFailure("unavailable", "this host session has no pi-subagents inspect command channel"));
+		}
+		if (this.#inspectInFlight) {
+			return Promise.resolve(this.#inspectFailure("busy", "an inspection of this generation is already in flight; wait for its answer"));
+		}
+		const requestId = this.#newInspectRequestId();
+		if (requestId === null) {
+			return Promise.resolve(this.#inspectFailure("unavailable", "this host could not generate an inspect request id"));
+		}
+		const commandText = subagentInspectCommand(requestId, id, childId, lines);
+		this.#inspectInFlight = true;
+		// The transport owns its widget subscription; the signal lets it release that
+		// subscription the moment this call stops waiting (deadline, dispose, answer).
+		const controller = typeof AbortController === "function" ? new AbortController() : null;
+		this.#inspectAbort = controller;
+		return new Promise((resolve) => {
+			let settled = false;
+			let timer = null;
+			const finish = (value) => {
+				if (settled) return;
+				settled = true;
+				if (timer !== null) {
+					try { this.#clearTimeout(timer); } catch { /* best effort */ }
+					timer = null;
+				}
+				try { controller?.abort(); } catch { /* best effort */ }
+				if (this.#inspectAbort === controller) this.#inspectAbort = null;
+				this.#inspectInFlight = false;
+				resolve(this.#active
+					? value
+					: failure("stale_generation", 409, "stale_generation", "the browser session generation is no longer current"));
+			};
+			try {
+				timer = this.#setTimeout(() => {
+					timer = null;
+					finish(this.#inspectFailure("timeout", `the pi-subagents inspect command did not answer within ${this.#inspectTimeoutMs}ms`));
+				}, this.#inspectTimeoutMs);
+				timer?.unref?.();
+			} catch (error) {
+				finish(this.#inspectFailure("unavailable", `the inspect deadline could not be scheduled: ${errorText(error)}`));
+				return;
+			}
+			let answer;
+			try {
+				answer = this.#inspectRunner(commandText, requestId, {
+					timeoutMs: this.#inspectTimeoutMs,
+					id,
+					childId,
+					lines,
+					...(controller ? { signal: controller.signal } : {}),
+				});
+			} catch (error) {
+				finish(this.#inspectFailure("failed", `the pi-subagents inspect command failed: ${errorText(error)}`));
+				return;
+			}
+			Promise.resolve(answer).then(
+				(value) => finish(this.#interpretInspectAnswer(value, requestId)),
+				(error) => finish(this.#inspectFailure("failed", `the pi-subagents inspect command failed: ${errorText(error)}`)),
+			);
+		});
+	}
+
+	/** Bounded failure for one structured inspection, always with a distinct code. */
+	#inspectFailure(kind, message) {
+		const [status, code] = SUBAGENT_INSPECT_FAILURES[kind] ?? SUBAGENT_INSPECT_FAILURES.failed;
+		return failure(code, status, code, message);
+	}
+
+	/** Validate constraints pi-subagents enforces once more on our side. */
+	#newInspectRequestId() {
+		let generated;
+		try {
+			generated = String(this.#randomUUID());
+		} catch {
+			return null;
+		}
+		const requestId = generated.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 64);
+		return isValidInspectRequestId(requestId) ? requestId : null;
+	}
+
+	/** Return whether the current snapshot of one retained run contains this child node id. */
+	#hasChildId(runId, childId) {
+		const run = this.#asyncSnapshot.runs.find((candidate) => candidate.id === runId);
+		if (!run) return false;
+		const stack = Array.isArray(run.children) ? [...run.children] : [];
+		while (stack.length > 0) {
+			const node = stack.pop();
+			if (!isRecord(node)) continue;
+			if (node.id === childId) return true;
+			if (Array.isArray(node.children)) stack.push(...node.children);
+		}
+		return false;
+	}
+
+	/**
+	 * Turn whatever the inspect runner answered with into one result. Accepted shapes:
+	 * a captured widget line (string), `{ ok: true, line }`, `{ ok: false, reason }`, or the
+	 * literal `false` a `session.prompt()` returns when the command is not registered.
+	 */
+	#interpretInspectAnswer(answer, requestId) {
+		if (answer === false) {
+			return this.#inspectFailure("unavailable", "the pi-subagents inspect command is not registered in this session, so it was never sent as a prompt");
+		}
+		let line;
+		if (typeof answer === "string") {
+			line = answer;
+		} else if (isRecord(answer)) {
+			if (answer.ok === false) {
+				const reason = safeCode(answer.reason, { fallback: "no_reply", maxChars: 64 });
+				if (reason === "not_registered") {
+					return this.#inspectFailure("unavailable", "the pi-subagents inspect command is not registered in this session, so it was never sent as a prompt");
+				}
+				if (reason === "commands_unavailable") {
+					return this.#inspectFailure("commandsUnavailable", "the session does not expose its command list, so the inspect command was refused instead of being sent as a model prompt");
+				}
+				if (reason === "no_capture" || reason === "no_session") {
+					return this.#inspectFailure("unavailable", "this host cannot run the pi-subagents inspect command against the bound session");
+				}
+				if (reason === "timeout") {
+					return this.#inspectFailure("timeout", `the pi-subagents inspect command did not answer within ${this.#inspectTimeoutMs}ms`);
+				}
+				if (reason === "no_payload") {
+					return this.#inspectFailure("failed", "the pi-subagents inspect command answered without a structured reply for this request");
+				}
+				return this.#inspectFailure("failed", `the pi-subagents inspect command did not return a usable reply (${reason})`);
+			}
+			line = typeof answer.line === "string" ? answer.line : undefined;
+		}
+		if (line === undefined) {
+			return this.#inspectFailure("failed", "the pi-subagents inspect command returned no structured reply");
+		}
+		const parsed = parseInspectWidgetLine(line);
+		if (!parsed.ok) {
+			return this.#inspectFailure("failed", `the pi-subagents inspect reply was rejected (${parsed.reason})`);
+		}
+		const projected = projectInspectReply(parsed.reply, { requestId });
+		if (projected.ok) {
+			return { ok: true, generation: this.#generation, inspect: projected.inspect };
+		}
+		if (projected.reason === "extension_error") {
+			const status = INSPECT_ERROR_STATUS[projected.error.code];
+			return status === undefined
+				? failure("inspect_failed", 502, "inspect_failed", projected.error.message)
+				: failure(projected.error.code, status, projected.error.code, projected.error.message);
+		}
+		return this.#inspectFailure("failed", `the pi-subagents inspect reply was rejected (${projected.reason})`);
+	}
+
 	dispose() {
 		if (!this.#active) return;
 		this.#active = false;
@@ -589,6 +823,9 @@ export class SubagentsBridge {
 		this.#pendingStatusRefresh = false;
 		this.#pendingReadyRecovery = false;
 		this.#recoveryInFlight = null;
+		const inspectAbort = this.#inspectAbort;
+		this.#inspectAbort = null;
+		try { inspectAbort?.abort(); } catch { /* best effort */ }
 		for (const pending of [...this.#pending]) {
 			pending.cancel();
 		}
@@ -758,6 +995,18 @@ export class SubagentsBridge {
 
 export function subagentReplyEvent(requestId) {
 	return `${SUBAGENT_RPC_REPLY_EVENT_PREFIX}${requestId}`;
+}
+
+/**
+ * Build the exact command line for one structured inspection. Every token is validated
+ * before it is appended, so no id or count can smuggle an extra argument or flag into the
+ * extension's argument parser.
+ */
+export function subagentInspectCommand(requestId, asyncId, childId, lines) {
+	const parts = [`/${INSPECT_COMMAND_NAME}`, requestId, asyncId];
+	if (childId !== undefined) parts.push(childId);
+	if (lines !== undefined) parts.push("--lines", String(lines));
+	return parts.join(" ");
 }
 
 export { detailText, projectAsyncSnapshot, projectFleet, projectResultSummary };

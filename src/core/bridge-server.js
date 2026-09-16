@@ -14,6 +14,7 @@ import { createServer as createHttpServer } from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { extname, join } from "node:path";
+import { INSPECT_LIMITS } from "./inspect-reply.js";
 import { LIMITS } from "./request-store.js";
 
 const HOST = "127.0.0.1";
@@ -190,7 +191,11 @@ const POST_BODY_KEYS = Object.freeze({
 	"/api/thinking": Object.freeze(["generation", "level"]),
 	"/api/subagents/details": Object.freeze(["generation", "id"]),
 	"/api/subagents/refresh": Object.freeze(["generation"]),
+	"/api/subagents/inspect": Object.freeze(["generation", "id", "childId", "lines"]),
 });
+
+/** Route paths of the read-only subagents slice (details / structured inspect / refresh). */
+const SUBAGENT_ROUTES = Object.freeze(["/api/subagents/details", "/api/subagents/refresh", "/api/subagents/inspect"]);
 
 /** Create an unpredictable per-session bearer token. */
 export function createBridgeToken() {
@@ -283,6 +288,7 @@ const NO_LIFECYCLE = Object.freeze({
 	sessionModel: async () => ({ ok: false, status: 503, code: "not_attached", message: "the browser model controls are not attached to a session" }),
 	sessionThinking: async () => ({ ok: false, status: 503, code: "not_attached", message: "the browser thinking controls are not attached to a session" }),
 	sessionSubagentsDetails: async () => ({ ok: false, status: 503, code: "not_attached", message: "the browser subagent status is not attached to a session" }),
+	sessionSubagentsInspect: async () => ({ ok: false, status: 503, code: "not_attached", message: "the browser subagent status is not attached to a session" }),
 	sessionSubagentsRefresh: async () => ({ ok: false, status: 503, code: "not_attached", message: "the browser subagent status is not attached to a session" }),
 });
 
@@ -341,7 +347,7 @@ function closeBridgeServer(server) {
  * @param {import("./request-store.js").RequestStore} options.store
  * @param {string} options.assetsDir directory holding index.html/app.js/app.css
  * @param {string} [options.token]
- * @param {{ snapshot: () => { generation: number, reloading: boolean }, reload: () => Promise<{ ok: boolean, status?: number, code?: string, message?: string, generation?: number }>, sessionSnapshot?: (options?: { chatSince?: number }) => object | null, sessionMessage?: (generation: number, body: object) => Promise<{ ok: boolean, status?: number, code?: string, message?: string, [key: string]: unknown }>, sessionStop?: (generation: number, body: object) => Promise<{ ok: boolean, status?: number, code?: string, message?: string, [key: string]: unknown }>, sessionModel?: (generation: number, body: object) => Promise<{ ok: boolean, status?: number, code?: string, message?: string, [key: string]: unknown }>, sessionThinking?: (generation: number, body: object) => Promise<{ ok: boolean, status?: number, code?: string, message?: string, [key: string]: unknown }>, sessionSubagentsDetails?: (generation: number, body: object) => Promise<{ ok: boolean, status?: number, code?: string, message?: string, [key: string]: unknown }>, sessionSubagentsRefresh?: (generation: number, body: object) => Promise<{ ok: boolean, status?: number, code?: string, message?: string, [key: string]: unknown }> }} [options.control]
+ * @param {{ snapshot: () => { generation: number, reloading: boolean }, reload: () => Promise<{ ok: boolean, status?: number, code?: string, message?: string, generation?: number }>, sessionSnapshot?: (options?: { chatSince?: number }) => object | null, sessionMessage?: (generation: number, body: object) => Promise<{ ok: boolean, status?: number, code?: string, message?: string, [key: string]: unknown }>, sessionStop?: (generation: number, body: object) => Promise<{ ok: boolean, status?: number, code?: string, message?: string, [key: string]: unknown }>, sessionModel?: (generation: number, body: object) => Promise<{ ok: boolean, status?: number, code?: string, message?: string, [key: string]: unknown }>, sessionThinking?: (generation: number, body: object) => Promise<{ ok: boolean, status?: number, code?: string, message?: string, [key: string]: unknown }>, sessionSubagentsDetails?: (generation: number, body: object) => Promise<{ ok: boolean, status?: number, code?: string, message?: string, [key: string]: unknown }>, sessionSubagentsInspect?: (generation: number, body: object) => Promise<{ ok: boolean, status?: number, code?: string, message?: string, [key: string]: unknown }>, sessionSubagentsRefresh?: (generation: number, body: object) => Promise<{ ok: boolean, status?: number, code?: string, message?: string, [key: string]: unknown }> }} [options.control]
  * @param {(handler: (req: import("node:http").IncomingMessage, res: import("node:http").ServerResponse) => void) => import("node:http").Server} [options.createServer] injectable server factory for binding tests
  * @param {(server: import("node:http").Server, options: object, onListening: () => void) => void} [options.listen] injectable listen seam for binding tests
  * @param {(input: string, init?: object) => Promise<Response>} [options.fetch] injectable client fetch seam for binding tests
@@ -517,7 +523,7 @@ export async function startBridgeServer({
 			return;
 		}
 
-		if (pathname === "/api/subagents/details" || pathname === "/api/subagents/refresh") {
+		if (SUBAGENT_ROUTES.includes(pathname)) {
 			if (req.method !== "POST") {
 				sendError(res, 405, "method_not_allowed", "use POST for subagent status actions");
 				return;
@@ -537,9 +543,11 @@ export async function startBridgeServer({
 				res,
 				body,
 				POST_BODY_KEYS[pathname],
-				pathname.endsWith("/details")
+				pathname === "/api/subagents/details"
 					? "subagent details only accept generation and id"
-					: "subagent refresh only accepts generation",
+					: pathname === "/api/subagents/inspect"
+						? "subagent inspection only accepts generation, id, childId and lines"
+						: "subagent refresh only accepts generation",
 			)) {
 				return;
 			}
@@ -552,7 +560,14 @@ export async function startBridgeServer({
 				sendError(res, 409, "stale_generation", "the browser session generation is no longer current");
 				return;
 			}
-			const sessionMethod = pathname.endsWith("/details") ? "sessionSubagentsDetails" : "sessionSubagentsRefresh";
+			if (pathname === "/api/subagents/inspect" && !validateInspectBody(res, body)) {
+				return;
+			}
+			const sessionMethod = pathname === "/api/subagents/details"
+				? "sessionSubagentsDetails"
+				: pathname === "/api/subagents/inspect"
+					? "sessionSubagentsInspect"
+					: "sessionSubagentsRefresh";
 			if (typeof control[sessionMethod] !== "function") {
 				sendError(res, 503, "not_attached", "the browser subagent status is not attached to a session");
 				return;
@@ -724,6 +739,34 @@ export async function startBridgeServer({
 		const unexpected = Object.keys(body).filter((key) => !allowedKeys.includes(key));
 		if (unexpected.length > 0) {
 			sendError(res, 400, "invalid_body", message);
+			return false;
+		}
+		return true;
+	}
+
+	/**
+	 * Type/range checks for the structured inspection body: an async run id and an optional
+	 * child node id must be non-empty bounded strings, `lines` must be the same 1..200
+	 * integer the extension accepts. The run id is *not* matched against a pattern here —
+	 * only the bridge's own generation allow-list decides which ids exist.
+	 */
+	function validateInspectBody(res, body) {
+		if (typeof body.id !== "string" || body.id.length === 0 || body.id.length > INSPECT_LIMITS.maxRunIdChars) {
+			sendError(res, 400, "invalid_body", "subagent inspection requires a non-empty async run id");
+			return false;
+		}
+		if (
+			body.childId !== undefined
+			&& (typeof body.childId !== "string" || body.childId.length === 0 || body.childId.length > INSPECT_LIMITS.maxRunIdChars)
+		) {
+			sendError(res, 400, "invalid_body", "a child node id must be a non-empty bounded string");
+			return false;
+		}
+		if (
+			body.lines !== undefined
+			&& (!Number.isInteger(body.lines) || body.lines < INSPECT_LIMITS.minLines || body.lines > INSPECT_LIMITS.maxLines)
+		) {
+			sendError(res, 400, "invalid_body", `lines must be an integer between ${INSPECT_LIMITS.minLines} and ${INSPECT_LIMITS.maxLines}`);
 			return false;
 		}
 		return true;

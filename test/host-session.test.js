@@ -61,7 +61,7 @@ after(() => {
 });
 
 describe("SDK host startup", () => {
-	it("creates a new session for the cwd, binds the UI context in tui mode and publishes the URL file", async () => {
+	it("creates a new session for the cwd, binds the UI context in rpc mode and publishes the URL file", async () => {
 		const tmp = tempDir();
 		const cwd = join(tmp, "workspace");
 		const urlFile = join(tmp, "state", "url");
@@ -78,11 +78,23 @@ describe("SDK host startup", () => {
 			assert.equal(calls.created[0].sessionManager, host.session.sessionManager);
 			assert.equal(calls.bound.length, 1, "bindExtensions must run exactly once");
 			assert.deepEqual(Object.keys(calls.bound[0]).sort(), ["mode", "uiContext"]);
-			assert.equal(calls.bound[0].mode, "tui");
+			assert.equal(
+				calls.bound[0].mode,
+				"rpc",
+				"rpc keeps the dialog surface and unlocks the pi-subagents host inspect command",
+			);
 			assert.equal(calls.bound[0].uiContext, host.uiContext);
 			for (const member of ["confirm", "select", "input", "editor", "custom"]) {
 				assert.equal(typeof calls.bound[0].uiContext[member], "function", `the bound UI context must expose ${member}`);
 			}
+			// The dialog contract is mode-independent (Pi's hasUI() only depends on a UI context
+			// being provided): confirm/select/input/editor still land in the browser under rpc.
+			const confirmPromise = calls.bound[0].uiContext.confirm("Mode check", "still answered in the browser?");
+			const pending = host.store.snapshot().pending.find((candidate) => candidate.kind === "confirm");
+			assert.ok(pending, "rpc mode must still create a browser-answerable confirm request");
+			assert.equal(host.store.answer(pending.id, { action: "answer", value: true }).ok, true);
+			assert.equal(await confirmPromise, true);
+			assert.equal(host.pendingCount, 0, "an answered rpc-mode dialog leaves nothing pending");
 
 			assert.match(host.url, /^http:\/\/127\.0\.0\.1:\d+\/#t=[0-9a-f]{64}$/);
 			assert.equal(readFileSync(urlFile, "utf8"), `${host.url}\n`);
@@ -415,7 +427,7 @@ describe("SDK host loader seam", () => {
 			assert.equal(state.calls.managers[0].cwd, tmp);
 			assert.equal(state.calls.created.length, 1);
 			assert.equal(state.calls.bound.length, 1);
-			assert.equal(state.calls.bound[0].mode, "tui");
+			assert.equal(state.calls.bound[0].mode, "rpc");
 			assert.equal(readFileSync(urlFile, "utf8"), `${host.url}\n`);
 			assert.equal(lines[0].includes(host.url), true);
 		} finally {

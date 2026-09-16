@@ -16,8 +16,14 @@ import {
 	SUBAGENT_CHILD_STATUS_EVENT,
 	SUBAGENT_RPC_READY_EVENT,
 } from "../src/core/subagents-rpc.js";
+import { RequestStore } from "../src/core/request-store.js";
 import { createHostLifecycle } from "../src/host/host.js";
-import { HostSubagentsBridge, missingSubagentsChannelExports, openSubagentsChannel } from "../src/host/subagents.js";
+import {
+	HostSubagentsBridge,
+	missingSubagentsChannelExports,
+	openSubagentsChannel,
+} from "../src/host/subagents.js";
+import { createBrowserUIContext } from "../src/host/ui-context.js";
 import { createFakeExtensionBus, createFakeSdk } from "./helpers/fake-sdk.js";
 import { createFakeSubagentsOwner, emptySubagentsStatusData, subagentsStatusData } from "./helpers/fake-subagents-owner.js";
 
@@ -31,6 +37,9 @@ function createHostBridge(bus, options = {}) {
 		logger: (message) => logs.push(message),
 		eventDebounceMs: options.eventDebounceMs ?? 5,
 		...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}),
+		...(options.session ? { session: options.session } : {}),
+		...(options.uiContext ? { uiContext: options.uiContext } : {}),
+		...(Number.isFinite(options.inspectTimeoutMs) ? { inspectTimeoutMs: options.inspectTimeoutMs } : {}),
 	});
 	return { bridge, logs };
 }
@@ -330,5 +339,229 @@ describe("createHostLifecycle subagents section", () => {
 		assert.equal(lifecycle.detachSubagents(), adapter);
 		assert.equal(lifecycle.sessionSnapshot(), null);
 		assert.equal((await lifecycle.sessionSubagentsRefresh(1, { generation: 1 })).code, "not_attached");
+	});
+
+	it("reports an unattached inspect route as not_attached instead of inventing data", async () => {
+		const lifecycle = createHostLifecycle();
+		assert.deepEqual(await lifecycle.sessionSubagentsInspect(1, { generation: 1, id: "async-real-id" }), {
+			ok: false,
+			status: 503,
+			code: "not_attached",
+			message: "the browser subagent status is not attached to a session",
+		});
+		const adapter = {
+			snapshot: () => ({ available: true, state: "ready-empty", revision: 1 }),
+			inspect: async (generation, body) => ({ ok: true, generation, inspect: { asyncId: body.id } }),
+		};
+		lifecycle.attachSubagents(adapter);
+		const answered = await lifecycle.sessionSubagentsInspect(1, { generation: 1, id: "async-real-id" });
+		assert.equal(answered.ok, true);
+		assert.equal(answered.inspect.asyncId, "async-real-id");
+	});
+});
+
+// --- structured inspection over the real host transport --------------------------------
+
+/**
+ * A session double shaped like `AgentSession` for the inspect path: a public command
+ * catalog, a `prompt()` that executes extension commands inline, and nothing else. The
+ * `prompt()` answer mirrors Pi 0.85.1 exactly: `undefined` for a handled command, `false`
+ * for one that is not registered.
+ */
+function createInspectSession({ commands = ["subagents-inspect-rpc"], onPrompt = null, runner = undefined } = {}) {
+	const calls = { prompts: [] };
+	const session = {
+		extensionRunner: runner !== undefined
+			? runner
+			: commands === null
+				? null
+				: { getRegisteredCommands: () => commands.map((invocationName) => ({ invocationName })) },
+		prompt(text) {
+			calls.prompts.push(text);
+			if (typeof onPrompt !== "function") return Promise.resolve(undefined);
+			try {
+				return Promise.resolve(onPrompt(text));
+			} catch (error) {
+				return Promise.reject(error);
+			}
+		},
+	};
+	return { session, calls };
+}
+
+/** Emulate the real extension: one payload line on the dedicated key, retracted right after. */
+function emittingExtension(uiContext, { reply = {}, key = "subagent-inspect", requestIdOverride = null } = {}) {
+	return (commandText) => {
+		const requestId = requestIdOverride ?? /^\/subagents-inspect-rpc (\S+)/.exec(commandText)?.[1] ?? "unknown";
+		const body = { asyncId: "async-real-id", requestId, ...reply };
+		uiContext.setWidget(key, [`PI_SUBAGENT_INSPECT_JSON:${JSON.stringify(body)}`]);
+		uiContext.setWidget(key, undefined);
+		return undefined;
+	};
+}
+
+describe("SDK host structured inspection", () => {
+	it("runs the extension command, captures the retracted payload and projects it", async () => {
+		const bus = createFakeExtensionBus();
+		const owner = createFakeSubagentsOwner(bus);
+		const store = new RequestStore();
+		const uiContext = createBrowserUIContext({ store, logger: () => {} });
+		const { session, calls } = createInspectSession({
+			onPrompt: emittingExtension(uiContext, {
+				reply: {
+					kind: "pi-subagents.inspect-reply",
+					version: 1,
+					status: "completed",
+					label: "Review",
+					task: "Review the bounded change",
+					messages: [
+						{ role: "user", kind: "text", text: "Review the bounded change" },
+						{ role: "assistant", kind: "toolCall", text: '{"path":"src/x.js"}', name: "read" },
+						{ role: "toolResult", kind: "toolResult", text: "file body", name: "read" },
+					],
+					finalOutput: "final answer",
+				},
+			}),
+		});
+		const { bridge } = createHostBridge(bus, { session, uiContext });
+		await bridge.bind();
+
+		const result = await bridge.inspect(7, { generation: 7, id: "async-real-id", lines: 50 });
+		assert.equal(result.ok, true);
+		assert.equal(result.generation, 7);
+		assert.equal(result.inspect.status, "completed");
+		assert.equal(result.inspect.task, "Review the bounded change");
+		assert.equal(result.inspect.finalOutput, "final answer");
+		assert.equal(result.inspect.messages.length, 3);
+		assert.equal(result.inspect.messages[1].kind, "toolCall");
+		assert.equal(result.inspect.messages[1].name, "read");
+		assert.match(calls.prompts[0], /^\/subagents-inspect-rpc [A-Za-z0-9_-]{1,64} async-real-id --lines 50$/);
+		assert.equal(uiContext.getWidget("subagent-inspect"), null, "the extension's retraction is respected");
+		assert.equal(uiContext.widgetListenerCount(), 0, "the inspect subscription is released after the answer");
+		assert.equal(store.pendingCount, 0, "inspection raises no browser dialog");
+		owner.dispose();
+		bridge.dispose();
+	});
+
+	it("refuses to prompt the model when the command is unavailable or not registered", async () => {
+		const bus = createFakeExtensionBus();
+		const owner = createFakeSubagentsOwner(bus);
+		const store = new RequestStore();
+		const uiContext = createBrowserUIContext({ store, logger: () => {} });
+
+		for (const [name, options, code] of [
+			["no command catalog", { commands: null }, "commands_unavailable"],
+			["a broken catalog", { runner: { getRegisteredCommands: () => { throw new Error("invalidated"); } } }, "commands_unavailable"],
+			["a catalog without the command", { commands: ["review", "help"] }, "inspect_unavailable"],
+		]) {
+			const { session, calls } = createInspectSession(options);
+			const { bridge } = createHostBridge(bus, { session, uiContext });
+			await bridge.bind();
+			const result = await bridge.inspect(7, { generation: 7, id: "async-real-id" });
+			assert.equal(result.ok, false, name);
+			assert.equal(result.status, 503, name);
+			assert.equal(result.code, code, name);
+			assert.deepEqual(calls.prompts, [], `${name} must never send a prompt that could become a model turn`);
+			bridge.dispose();
+		}
+		owner.dispose();
+	});
+
+	it("treats prompt()'s false as a missing command and a rejected prompt as a failure", async () => {
+		const bus = createFakeExtensionBus();
+		const owner = createFakeSubagentsOwner(bus);
+		const uiContext = createBrowserUIContext({ store: new RequestStore(), logger: () => {} });
+
+		const { session: missing, calls: missingCalls } = createInspectSession({ onPrompt: () => false });
+		const { bridge: missingBridge } = createHostBridge(bus, { session: missing, uiContext });
+		await missingBridge.bind();
+		const refused = await missingBridge.inspect(7, { generation: 7, id: "async-real-id" });
+		assert.equal(refused.status, 503);
+		assert.equal(refused.code, "inspect_unavailable");
+		assert.match(refused.message, /not registered/);
+		assert.equal(missingCalls.prompts.length, 1, "the answer decides, not a second attempt");
+		missingBridge.dispose();
+
+		const { session: throwing, calls: throwingCalls } = createInspectSession({ onPrompt: () => { throw new Error("handler exploded"); } });
+		const { bridge: throwingBridge } = createHostBridge(bus, { session: throwing, uiContext });
+		await throwingBridge.bind();
+		const failed = await throwingBridge.inspect(7, { generation: 7, id: "async-real-id" });
+		assert.equal(failed.status, 502);
+		assert.equal(failed.code, "inspect_failed");
+		assert.equal(throwingCalls.prompts.length, 1, "a rejected command must not be retried");
+		throwingBridge.dispose();
+		owner.dispose();
+	});
+
+	it("bounds the round trip, releases its subscription, and ignores uncorrelated payloads", async () => {
+		const bus = createFakeExtensionBus();
+		const owner = createFakeSubagentsOwner(bus);
+		const uiContext = createBrowserUIContext({ store: new RequestStore(), logger: () => {} });
+
+		const { session: hanging, calls: hangingCalls } = createInspectSession({ onPrompt: () => new Promise(() => {}) });
+		const { bridge: hangingBridge } = createHostBridge(bus, { session: hanging, uiContext, inspectTimeoutMs: 20 });
+		await hangingBridge.bind();
+		const timedOut = await hangingBridge.inspect(7, { generation: 7, id: "async-real-id" });
+		assert.equal(timedOut.status, 504);
+		assert.equal(timedOut.code, "inspect_timeout");
+		assert.equal(hangingCalls.prompts.length, 1, "a wedged command is not retried");
+		assert.equal(uiContext.widgetListenerCount(), 0, "a timed-out inspection releases its widget subscription");
+		hangingBridge.dispose();
+
+		const { session: foreign, calls: foreignCalls } = createInspectSession({
+			onPrompt: emittingExtension(uiContext, { requestIdOverride: "someone-else", reply: { kind: "pi-subagents.inspect-reply", version: 1 } }),
+		});
+		const { bridge: foreignBridge } = createHostBridge(bus, { session: foreign, uiContext });
+		await foreignBridge.bind();
+		const uncorrelated = await foreignBridge.inspect(7, { generation: 7, id: "async-real-id" });
+		assert.equal(uncorrelated.status, 502);
+		assert.equal(uncorrelated.code, "inspect_failed");
+		assert.match(uncorrelated.message, /without a structured reply/);
+		assert.equal("inspect" in uncorrelated, false, "a payload for another request is discarded, never rendered");
+		assert.equal(foreignCalls.prompts.length, 1);
+		// After the failed correlation the next request still works: nothing stays in flight.
+		const { session: healthy } = createInspectSession({
+			onPrompt: emittingExtension(uiContext, { reply: { kind: "pi-subagents.inspect-reply", version: 1, status: "completed" } }),
+		});
+		foreignBridge.dispose();
+		const { bridge: healthyBridge } = createHostBridge(bus, { session: healthy, uiContext });
+		await healthyBridge.bind();
+		const answered = await healthyBridge.inspect(7, { generation: 7, id: "async-real-id" });
+		assert.equal(answered.ok, true);
+		healthyBridge.dispose();
+		owner.dispose();
+	});
+
+	it("reports an answered command without a payload instead of inventing one", async () => {
+		const bus = createFakeExtensionBus();
+		const owner = createFakeSubagentsOwner(bus);
+		const uiContext = createBrowserUIContext({ store: new RequestStore(), logger: () => {} });
+		const { session } = createInspectSession({ onPrompt: () => undefined });
+		const { bridge } = createHostBridge(bus, { session, uiContext });
+		await bridge.bind();
+		const result = await bridge.inspect(7, { generation: 7, id: "async-real-id" });
+		assert.equal(result.status, 502);
+		assert.equal(result.code, "inspect_failed");
+		assert.match(result.message, /structured reply/);
+		assert.equal(uiContext.getWidgetCapture("subagent-inspect"), null);
+		owner.dispose();
+		bridge.dispose();
+	});
+
+	it("keeps a stray payload for another key or request out of the projection", async () => {
+		const bus = createFakeExtensionBus();
+		const owner = createFakeSubagentsOwner(bus);
+		const uiContext = createBrowserUIContext({ store: new RequestStore(), logger: () => {} });
+		uiContext.setWidget("subagent-inspect", ["PI_SUBAGENT_INSPECT_JSON:{not json}"]);
+		const { session } = createInspectSession({
+			onPrompt: emittingExtension(uiContext, { key: "some-other-widget", reply: { kind: "pi-subagents.inspect-reply", version: 1 } }),
+		});
+		const { bridge } = createHostBridge(bus, { session, uiContext });
+		await bridge.bind();
+		const result = await bridge.inspect(7, { generation: 7, id: "async-real-id" });
+		assert.equal(result.status, 502);
+		assert.equal(result.code, "inspect_failed");
+		owner.dispose();
+		bridge.dispose();
 	});
 });

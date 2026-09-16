@@ -85,6 +85,9 @@ const state = {
 	subagentsGeneration: null,
 	subagentsRefreshing: false,
 	subagentDetails: new Map(),
+	subagentInspects: new Map(),
+	subagentInspectNodes: new Map(),
+	subagentOpenChildren: new Map(),
 };
 
 function readToken() {
@@ -538,6 +541,393 @@ async function requestSubagentDetail(card, id, button, resultElement) {
 	}
 }
 
+/*
+ * Structured subagent inspection (read-only).
+ *
+ * `POST /api/subagents/inspect` answers with the host's bounded projection of the child
+ * session (task, messages, final output, truncation flags). The panel stays collapsed and
+ * sends nothing until the user clicks its own toggle, and everything it shows is built
+ * with textContent/DOM only, so host text is never parsed as markup. The raw artifact tail
+ * ("View transcript") keeps its own path and stays the fallback when this view cannot
+ * answer.
+ */
+
+/**
+ * One line of copy per documented failure code. Timeout, busy, unavailable and foreign
+ * sessions must stay distinguishable instead of collapsing into one "failed" message.
+ */
+const INSPECT_ERROR_TEXT = Object.freeze({
+	invalid_body: ["Invalid request", "the host rejected the inspection request as invalid"],
+	unauthorized: ["Not authorized", "this page is no longer accepted by the running Pi process"],
+	bad_origin: ["Blocked", "the host rejected the request origin"],
+	foreign_session: ["Other session", "this run belongs to a different Pi session"],
+	not_found: ["Not found", "this run is not part of the current subagent snapshot any more"],
+	stale_generation: ["Stale session", "the session generation changed; wait for the new binding"],
+	stale: ["Stale snapshot", "the subagent snapshot is stale; refresh the subagents card and retry"],
+	reloading: ["Reloading", "the session is reloading; wait for the new generation"],
+	inspect_busy: ["Busy", "another structured inspection is already in flight; try again in a moment"],
+	no_active_session: ["No session", "no Pi session is active in this host"],
+	inspect_unavailable: ["Unavailable", "the pi-subagents inspect command is not available in this session"],
+	commands_unavailable: ["Unavailable", "the session did not expose its command list, so the inspection was refused"],
+	inspect_timeout: ["Timed out", "the pi-subagents inspect command did not answer in time"],
+	no_generation: ["Not connected", "the page has no current session generation yet"],
+	network: ["Network error", "the page could not reach the Pi host"],
+});
+
+let inspectPanelSeq = 0;
+
+function inspectFailureText(code, message) {
+	const known = INSPECT_ERROR_TEXT[code];
+	const label = known ? known[0] : "Failed";
+	const text = known ? known[1] : "the host reported an unrecognized inspection failure";
+	const detail = typeof message === "string" && message.length > 0 ? message : "";
+	return { detail, line: `${label} (${code || "inspect_failed"}): ${text}` };
+}
+
+function inspectKey(runId, childId) {
+	return childId ? `run:${runId}#${childId}` : `run:${runId}`;
+}
+
+function inspectEntry(key, runId) {
+	const existing = state.subagentInspects.get(key);
+	if (existing) {
+		existing.runId = runId;
+		return existing;
+	}
+	const entry = { runId, open: false, status: "idle", payload: null, code: null, message: null };
+	state.subagentInspects.set(key, entry);
+	return entry;
+}
+
+/** Fake-DOM-safe attachment test: real nodes expose `isConnected`, stubs expose `parent`. */
+function isAttached(node) {
+	return typeof node?.isConnected === "boolean" ? node.isConnected === true : Boolean(node?.parent);
+}
+
+/**
+ * Visual kind of one message row. pi-subagents marks tool calls with `kind: "toolCall"`,
+ * but tool results usually arrive as `kind: "text"` with `role: "toolResult"`, so both
+ * signals decide how the row is drawn.
+ */
+function inspectMessageKind(message) {
+	if (message.kind === "toolCall") {
+		return "toolCall";
+	}
+	const role = typeof message.role === "string" ? message.role.toLowerCase() : "";
+	if (message.kind === "toolResult" || role === "toolresult" || role === "tool") {
+		return "toolResult";
+	}
+	return "text";
+}
+
+function inspectMessageLabel(message, kind) {
+	const role = subagentValue(message.role);
+	const name = typeof message.name === "string" && message.name.length > 0 ? message.name : "";
+	if (kind === "toolCall") {
+		return `${role} · tool call: ${name || "tool"}`;
+	}
+	if (kind === "toolResult") {
+		return `tool result${name ? `: ${name}` : ""}${message.isError === true ? " (error)" : ""}`;
+	}
+	return role;
+}
+
+function appendInspectHeading(parent, text, suffix = "") {
+	return appendSubagentText(parent, "subagent-inspect-heading", suffix ? `${text} · ${suffix}` : text);
+}
+
+function appendInspectNote(parent, text) {
+	const note = appendSubagentText(parent, "subagent-inspect-note", text);
+	note.dataset.state = "warning";
+	return note;
+}
+
+function inspectTruncated(inspect) {
+	const truncated = inspect.truncated && typeof inspect.truncated === "object" ? inspect.truncated : {};
+	return {
+		task: truncated.task === true,
+		messages: Number.isSafeInteger(truncated.messages) && truncated.messages > 0 ? truncated.messages : 0,
+		finalOutput: truncated.finalOutput === true,
+	};
+}
+
+function renderInspectMessages(body, inspect, truncated) {
+	const messages = Array.isArray(inspect.messages) ? inspect.messages : [];
+	appendInspectHeading(body, "Messages", messages.length > 0 ? `${messages.length} shown` : "");
+	if (truncated.messages > 0) {
+		const count = truncated.messages;
+		appendInspectNote(body, `Earlier ${count} message${count === 1 ? " was" : "s were"} dropped by the host's bound; this list starts later.`);
+	}
+	if (messages.length === 0) {
+		// A running child often has no readable session file yet: an empty list is a normal
+		// empty state, not a failure, and must not be dressed up as one.
+		const running = typeof inspect.status === "string" && inspect.status.toLowerCase() === "running";
+		appendSubagentText(
+			body,
+			"subagent-inspect-empty",
+			running
+				? "This run is still running and its child session has no readable messages yet. An empty list here is normal, not a failure."
+				: "The host returned no messages for this run.",
+		);
+		return;
+	}
+	const list = document.createElement("ol");
+	list.className = "subagent-inspect-messages";
+	for (const message of messages) {
+		if (!message || typeof message !== "object") {
+			continue;
+		}
+		const item = document.createElement("li");
+		item.className = "subagent-inspect-message";
+		const kind = inspectMessageKind(message);
+		item.dataset.kind = kind;
+		if (message.isError === true) {
+			item.dataset.state = "error";
+		}
+		appendSubagentText(item, "subagent-inspect-label", inspectMessageLabel(message, kind));
+		appendSubagentText(item, "subagent-inspect-text", typeof message.text === "string" && message.text.length > 0 ? message.text : "(empty message)");
+		list.append(item);
+	}
+	body.append(list);
+}
+
+function renderInspectContent(body, inspect) {
+	const truncated = inspectTruncated(inspect);
+	const task = typeof inspect.task === "string" && inspect.task.length > 0 ? inspect.task : "";
+	appendInspectHeading(body, "Task");
+	if (truncated.task) {
+		appendInspectNote(body, "The task text was truncated by the host's bound.");
+	}
+	if (task) {
+		appendSubagentText(body, "subagent-inspect-task", task);
+	} else {
+		appendSubagentText(body, "subagent-inspect-empty", "Unknown — no task text was reported for this run.");
+	}
+	renderInspectMessages(body, inspect, truncated);
+	const finalOutput = typeof inspect.finalOutput === "string" && inspect.finalOutput.length > 0 ? inspect.finalOutput : "";
+	appendInspectHeading(body, "Final output");
+	if (truncated.finalOutput) {
+		appendInspectNote(body, "The final output was truncated by the host's bound.");
+	}
+	if (finalOutput) {
+		appendSubagentText(body, "subagent-inspect-final", finalOutput);
+	} else {
+		appendSubagentText(body, "subagent-inspect-empty", "Unknown — no final output was reported for this run.");
+	}
+}
+
+/** Repaint one existing panel from its cached entry (never sends a request by itself). */
+function paintInspect(nodes) {
+	const entry = state.subagentInspects.get(nodes.key);
+	if (!entry) {
+		return;
+	}
+	const open = entry.open === true;
+	nodes.toggle.textContent = open ? "Hide structured view" : "Structured view";
+	nodes.toggle.setAttribute("aria-expanded", open ? "true" : "false");
+	nodes.panel.classList.toggle("hidden", !open);
+	nodes.panel.setAttribute("aria-busy", entry.status === "loading" ? "true" : "false");
+	clearElement(nodes.status);
+	clearElement(nodes.body);
+	nodes.status.dataset.state = "";
+	if (entry.status === "idle") {
+		return;
+	}
+	if (entry.status === "loading") {
+		nodes.status.dataset.state = "waiting";
+		nodes.status.textContent = "Requesting the structured view…";
+		return;
+	}
+	if (entry.status === "error") {
+		const failure = inspectFailureText(entry.code, entry.message);
+		nodes.status.dataset.state = "error";
+		nodes.status.textContent = `Structured view unavailable · ${failure.line}`;
+		appendSubagentText(nodes.body, "subagent-inspect-note", `Host reply: ${failure.detail || "no detail was returned"}`);
+		return;
+	}
+	const inspect = entry.payload && typeof entry.payload === "object" ? entry.payload : {};
+	const parts = [`status: ${subagentValue(inspect.status)}`];
+	if (typeof inspect.label === "string" && inspect.label.length > 0) {
+		parts.push(`label: ${inspect.label}`);
+	}
+	if (nodes.childId) {
+		parts.push(`child: ${nodes.childId}`);
+	}
+	appendSubagentText(nodes.body, "subagent-inspect-meta", parts.join(" · "));
+	renderInspectContent(nodes.body, inspect);
+}
+
+function repaintInspect(key) {
+	const nodes = state.subagentInspectNodes.get(key);
+	if (nodes && isAttached(nodes.panel)) {
+		paintInspect(nodes);
+	}
+}
+
+function setInspectFailure(key, code, message) {
+	const entry = state.subagentInspects.get(key);
+	if (!entry) {
+		return;
+	}
+	entry.status = "error";
+	entry.payload = null;
+	entry.code = code;
+	entry.message = message;
+	repaintInspect(key);
+}
+
+async function requestInspect(nodes) {
+	const entry = state.subagentInspects.get(nodes.key);
+	if (!entry) {
+		return;
+	}
+	if (state.generation === null) {
+		setInspectFailure(nodes.key, "no_generation", "the page is not attached to a session generation yet");
+		return;
+	}
+	const body = { generation: state.generation, id: entry.runId };
+	if (nodes.childId) {
+		body.childId = nodes.childId;
+	}
+	try {
+		const response = await api("/api/subagents/inspect", { method: "POST", body });
+		const payload = await response.json().catch(() => ({}));
+		if (!response.ok) {
+			const code = payload?.error?.code ?? `http_${response.status}`;
+			setInspectFailure(nodes.key, code, payload?.error?.message ?? "unknown reason");
+			if (response.status === 401) {
+				handleUnauthorized();
+			}
+			return;
+		}
+		const inspect = payload?.inspect;
+		if (!inspect || typeof inspect !== "object") {
+			setInspectFailure(nodes.key, "inspect_failed", "the host answered without a structured payload");
+			return;
+		}
+		const current = state.subagentInspects.get(nodes.key);
+		if (!current) {
+			return;
+		}
+		current.status = "done";
+		current.payload = inspect;
+		current.code = null;
+		current.message = null;
+		repaintInspect(nodes.key);
+	} catch (error) {
+		setInspectFailure(nodes.key, "network", error instanceof Error ? error.message : String(error));
+	}
+}
+
+function toggleInspect(nodes) {
+	const entry = state.subagentInspects.get(nodes.key);
+	if (!entry) {
+		return;
+	}
+	if (entry.open === true) {
+		entry.open = false;
+		paintInspect(nodes);
+		return;
+	}
+	entry.open = true;
+	// Every genuine open takes a fresh snapshot: the panel has no refresh control and shows a
+	// point-in-time answer, so reusing a previous one would make a running run look frozen.
+	entry.status = "loading";
+	entry.payload = null;
+	entry.code = null;
+	entry.message = null;
+	paintInspect(nodes);
+	requestInspect(nodes);
+}
+
+/** Collapsed-by-default toggle + panel for one run or one id-bearing child node. */
+function buildInspectPanel({ runId, childId = null, label }) {
+	const key = inspectKey(runId, childId);
+	inspectEntry(key, runId);
+	inspectPanelSeq += 1;
+	const panelId = `subagent-inspect-panel-${inspectPanelSeq}`;
+	const container = document.createElement("div");
+	container.className = "subagent-inspect";
+	if (childId) {
+		container.dataset.kind = "child";
+	}
+	const toggle = document.createElement("button");
+	toggle.type = "button";
+	// The structured view is the primary path (it is what the panel is for); the raw artifact
+	// transcript keeps working as the documented fallback.
+	toggle.className = "subagent-inspect-toggle primary";
+	toggle.setAttribute("aria-controls", panelId);
+	const panel = document.createElement("div");
+	panel.id = panelId;
+	panel.className = "subagent-inspect-panel";
+	panel.setAttribute("role", "region");
+	panel.setAttribute("aria-label", label);
+	// The panel scrolls internally, so it must be reachable and scrollable by keyboard in
+	// every engine, not only where scrollable regions are focusable by default.
+	panel.tabIndex = 0;
+	const status = document.createElement("p");
+	status.className = "subagent-inspect-status";
+	status.setAttribute("role", "status");
+	const body = document.createElement("div");
+	body.className = "subagent-inspect-body";
+	panel.append(status, body);
+	const nodes = { key, childId, container, toggle, panel, status, body };
+	toggle.addEventListener("click", () => toggleInspect(nodes));
+	state.subagentInspectNodes.set(key, nodes);
+	container.append(toggle, panel);
+	paintInspect(nodes);
+	return container;
+}
+
+/** Bounded child list: id-bearing nodes get their own view, others say why they cannot. */
+function renderChildNode(runId, child, depth = 0) {
+	const item = document.createElement("li");
+	item.className = "subagent-child";
+	appendSubagentText(item, "subagent-child-summary", summaryText(child));
+	const childId = typeof child?.id === "string" && child.id.length > 0 ? child.id : null;
+	if (childId) {
+		item.append(buildInspectPanel({ runId, childId, label: `Structured view of child node ${childId}` }));
+	} else {
+		appendSubagentText(
+			item,
+			"subagent-inspect-unavailable",
+			"Structured view unavailable: this node has no id in the status snapshot, and the host only accepts node ids it has reported.",
+		);
+	}
+	const nested = Array.isArray(child?.children) ? child.children : [];
+	if (nested.length > 0 && depth < 4) {
+		const list = document.createElement("ul");
+		list.className = "subagent-child-list";
+		for (const node of nested) {
+			list.append(renderChildNode(runId, node, depth + 1));
+		}
+		item.append(list);
+	}
+	return item;
+}
+
+function renderChildrenList(card, run) {
+	const children = Array.isArray(run.children) ? run.children : [];
+	if (children.length === 0) {
+		return;
+	}
+	const details = document.createElement("details");
+	details.className = "subagent-children";
+	// Each poll rebuilds the rail; keep the disclosure the reader opened open.
+	details.open = state.subagentOpenChildren.get(run.id) === true;
+	details.addEventListener("toggle", () => {
+		state.subagentOpenChildren.set(run.id, details.open === true);
+	});
+	const summary = document.createElement("summary");
+	summary.textContent = `Child summaries (${children.length})`;
+	const list = document.createElement("ul");
+	for (const child of children) {
+		list.append(renderChildNode(run.id, child));
+	}
+	details.append(summary, list);
+	card.append(details);
+}
+
 function renderAsyncRun(run) {
 	const card = document.createElement("article");
 	card.className = "subagent-run";
@@ -558,7 +948,6 @@ function renderAsyncRun(run) {
 	actions.className = "subagent-run-actions";
 	const button = document.createElement("button");
 	button.type = "button";
-	button.className = "primary";
 	button.textContent = "View transcript";
 	const result = document.createElement("p");
 	result.className = "subagent-run-meta";
@@ -566,7 +955,11 @@ function renderAsyncRun(run) {
 	button.addEventListener("click", () => requestSubagentDetail(card, run.id, button, result));
 	actions.append(button, result);
 	card.append(actions);
-	renderSummaryList(card, "Child summaries", run.children, "subagent-children");
+	// The two views are not alternatives: the structured view reads the child session while
+	// the transcript stays the raw artifact tail that still works when the former cannot.
+	appendSubagentText(card, "subagent-run-note", "Structured view = parsed child session (task · messages · tools). Transcript = raw artifact tail (fallback).");
+	card.append(buildInspectPanel({ runId: run.id, label: `Structured view of async run ${run.id}` }));
+	renderChildrenList(card, run);
 	renderSummaryList(card, "Result summaries", run.results, "subagent-results");
 	return card;
 }
@@ -612,6 +1005,19 @@ function renderSubagents(snapshot) {
 	clearElement(elements.subagentsAsync);
 	const fleetEntries = Array.isArray(state.subagentsSnapshot?.fleet?.entries) ? state.subagentsSnapshot.fleet.entries : [];
 	const asyncRuns = Array.isArray(state.subagentsSnapshot?.asyncSnapshot?.runs) ? state.subagentsSnapshot.asyncSnapshot.runs : [];
+	// The rail is rebuilt on every snapshot revision: drop the DOM registry of the previous
+	// pass and every cached structured view whose run is gone, so neither can grow unbounded.
+	state.subagentInspectNodes.clear();
+	const activeRunIds = new Set();
+	for (const run of asyncRuns) {
+		if (run && typeof run.id === "string") activeRunIds.add(run.id);
+	}
+	for (const [key, entry] of [...state.subagentInspects]) {
+		if (!activeRunIds.has(entry.runId)) state.subagentInspects.delete(key);
+	}
+	for (const runId of [...state.subagentOpenChildren.keys()]) {
+		if (!activeRunIds.has(runId)) state.subagentOpenChildren.delete(runId);
+	}
 	for (const entry of fleetEntries) elements.subagentsFleet.append(renderFleetEntry(entry));
 	for (const run of asyncRuns) {
 		if (run && typeof run.id === "string") elements.subagentsAsync.append(renderAsyncRun(run));
@@ -1321,6 +1727,9 @@ async function poll() {
 			state.rendered.clear();
 			resetChatState();
 			state.subagentDetails.clear();
+			state.subagentInspects.clear();
+			state.subagentInspectNodes.clear();
+			state.subagentOpenChildren.clear();
 			state.subagentsSnapshot = null;
 			state.subagentsGeneration = null;
 		}

@@ -47,10 +47,11 @@ const HINT_CHANNELS = [SUBAGENT_ASYNC_COMPLETE_EVENT, SUBAGENT_ASYNC_STARTED_EVE
  * `startHost` and receives the fixture, so a fake RPC owner can be registered while the host
  * boots — exactly the timing of the real extension, which registers during resource load.
  */
-async function withHost(run, { extensionBus = true, timeoutMs, eventDebounceMs, logger = () => {}, setup = null } = {}) {
+async function withHost(run, { extensionBus = true, timeoutMs, eventDebounceMs, inspectTimeoutMs, logger = () => {}, setup = null } = {}) {
 	const tmp = mkdtempSync(join(tmpdir(), "pi-gui-subagents-"));
-	const { sdk, bus, calls } = createFakeSdk({ extensionBus });
-	const extra = typeof setup === "function" ? await setup({ sdk, bus, calls, tmp }) : {};
+	const { sdk, bus, calls, session, listeners } = createFakeSdk({ extensionBus });
+	const extra = typeof setup === "function" ? await setup({ sdk, bus, calls, tmp, session, listeners }) : {};
+
 	const host = await startHost({
 		cwd: tmp,
 		urlFile: join(tmp, "url"),
@@ -62,9 +63,10 @@ async function withHost(run, { extensionBus = true, timeoutMs, eventDebounceMs, 
 		statusExecFile: gitStub(),
 		...(timeoutMs ? { subagentsTimeoutMs: timeoutMs } : {}),
 		...(eventDebounceMs !== undefined ? { subagentsEventDebounceMs: eventDebounceMs } : {}),
+		...(inspectTimeoutMs !== undefined ? { subagentsInspectTimeoutMs: inspectTimeoutMs } : {}),
 	});
 	try {
-		return await run({ host, tmp, bus, calls, sdk, ...extra });
+		return await run({ host, tmp, bus, calls, sdk, session, ...extra });
 	} finally {
 		await host.close("test");
 		rmSync(tmp, { recursive: true, force: true });
@@ -381,6 +383,237 @@ describe("SDK host subagents over HTTP", () => {
 		}, {
 			eventDebounceMs: 20,
 			setup: ({ bus }) => ({ owner: createFakeSubagentsOwner(bus) }),
+		});
+	});
+
+	describe("structured inspection", () => {
+		/**
+		 * Install a session double that behaves like the real pi-subagents extension: the command
+		 * catalog lists it, `prompt()` executes the command inline (no model turn), and the answer
+		 * arrives as one widget payload the extension retracts immediately.
+		 */
+		function installInspectCommand(session, uiContextRef, { reply = {}, catalog = ["subagents-inspect-rpc", "review"], answer = undefined, throws = null } = {}) {
+			session.extensionRunner = { getRegisteredCommands: () => catalog.map((invocationName) => ({ invocationName })) };
+			session.onPrompt = (text) => {
+				if (throws) throw new Error(throws);
+				if (typeof answer !== "undefined") return answer;
+				const request = /^\/subagents-inspect-rpc (\S+) (\S+)(?: (\S+))?/.exec(text);
+				if (!request) return undefined;
+				const [, requestId, asyncId, childId] = request;
+				const payload = `PI_SUBAGENT_INSPECT_JSON:${JSON.stringify({
+					kind: "pi-subagents.inspect-reply",
+					version: 1,
+					requestId,
+					asyncId,
+					...(childId ? { childId } : {}),
+					status: "completed",
+					label: "Review",
+					task: "Review the bounded change",
+					messages: [
+						{ role: "user", kind: "text", text: "Review the bounded change" },
+						{ role: "assistant", kind: "toolCall", text: '{"path":"src/x.js"}', name: "read" },
+						{ role: "toolResult", kind: "toolResult", text: "file body", name: "read" },
+					],
+					finalOutput: "final answer",
+					...reply,
+				})}`;
+				uiContextRef.value.setWidget("subagent-inspect", [payload]);
+				uiContextRef.value.setWidget("subagent-inspect", undefined);
+				return undefined;
+			};
+		}
+
+		it("round-trips one structured inspection over HTTP without touching the chat", async () => {
+			const uiContextRef = { value: null };
+			await withHost(async ({ host, calls, owner }) => {
+				uiContextRef.value = host.uiContext;
+				await host.subagents.bind();
+
+				const response = await post(host, "/api/subagents/inspect", { generation: 1, id: "async-real-id", childId: "child-id", lines: 40 });
+				assert.equal(response.status, 200);
+				const payload = response.payload;
+				assert.equal(payload.ok, true);
+				assert.equal(payload.generation, 1);
+				assert.equal(payload.inspect.asyncId, "async-real-id");
+				assert.equal(payload.inspect.childId, "child-id");
+				assert.equal(payload.inspect.status, "completed");
+				assert.equal(payload.inspect.label, "Review");
+				assert.equal(payload.inspect.task, "Review the bounded change");
+				assert.equal(payload.inspect.finalOutput, "final answer");
+				assert.equal(payload.inspect.messages.length, 3);
+				assert.deepEqual(payload.inspect.messages[1], { role: "assistant", kind: "toolCall", text: '{"path":"src/x.js"}', name: "read" });
+				assert.equal(payload.inspect.messages[2].kind, "toolResult");
+				assert.deepEqual(payload.inspect.truncated, { task: false, messages: 0, finalOutput: false });
+
+				// The command runs through the session, not through the chat bridge.
+				assert.equal(calls.prompts.length, 1, "exactly one prompt, and it is the inspect command");
+				assert.match(calls.prompts[0].text, /^\/subagents-inspect-rpc [A-Za-z0-9_-]{1,64} async-real-id child-id --lines 40$/);
+				assert.deepEqual(owner.methods().slice(0, 2), ["ping", "status"], "inspection adds no in-process RPC");
+				assert.deepEqual(host.chat.snapshot().messages, [], "inspection must not write chat history");
+				assert.equal(host.uiContext.getWidget("subagent-inspect"), null, "the retracted widget stays retracted");
+				assert.equal(host.uiContext.widgetListenerCount(), 0, "the capture subscription is released");
+
+				const state = await getState(host);
+				assert.deepEqual(state.payload.chat.messages, [], "neither does it appear in the chat snapshot");
+				assert.equal(JSON.stringify(payload).includes("async-subagent-runs"), false, "no host path in the response");
+			}, {
+				setup: ({ bus, session }) => {
+					installInspectCommand(session, uiContextRef);
+					return { owner: createFakeSubagentsOwner(bus) };
+				},
+			});
+		});
+
+		it("refuses unknown, invalid and stale requests without prompting the model", async () => {
+			const uiContextRef = { value: null };
+			await withHost(async ({ host, calls, owner }) => {
+				uiContextRef.value = host.uiContext;
+				await host.subagents.bind();
+
+				const fleetKey = await post(host, "/api/subagents/inspect", { generation: 1, id: "fleet-display-key" });
+				assert.equal(fleetKey.status, 404);
+				assert.equal(fleetKey.payload.error.code, "not_found");
+
+				const unknownChild = await post(host, "/api/subagents/inspect", { generation: 1, id: "async-real-id", childId: "not-a-node" });
+				assert.equal(unknownChild.status, 404);
+				assert.equal(unknownChild.payload.error.code, "not_found");
+
+				const extraField = await post(host, "/api/subagents/inspect", { generation: 1, id: "async-real-id", view: "transcript" });
+				assert.equal(extraField.status, 400);
+				assert.equal(extraField.payload.error.code, "invalid_body");
+
+				const badLines = await post(host, "/api/subagents/inspect", { generation: 1, id: "async-real-id", lines: 500 });
+				assert.equal(badLines.status, 400);
+				assert.equal(badLines.payload.error.code, "invalid_body");
+
+				const stale = await post(host, "/api/subagents/inspect", { generation: 2, id: "async-real-id" });
+				assert.equal(stale.status, 409);
+				assert.equal(stale.payload.error.code, "stale_generation");
+
+				const crossSite = await post(host, "/api/subagents/inspect", { generation: 1, id: "async-real-id" }, { Origin: "https://evil.example" });
+				assert.equal(crossSite.status, 403);
+
+				const noToken = await request(host, "/api/subagents/inspect", {
+					method: "POST",
+					headers: { Origin: host.origin, "Content-Type": "application/json" },
+					body: { generation: 1, id: "async-real-id" },
+				});
+				assert.equal(noToken.status, 401);
+
+				assert.deepEqual(calls.prompts, [], "a refused request must never reach the session as a prompt");
+				assert.equal(owner.targeted().length, 0, "and never target a run over the RPC owner");
+			}, {
+				setup: ({ bus, session }) => {
+					installInspectCommand(session, uiContextRef);
+					return { owner: createFakeSubagentsOwner(bus) };
+				},
+			});
+		});
+
+		it("reports an unavailable command channel honestly instead of prompting the model", async () => {
+			const cases = [
+				["no catalog at all", ({ session }) => { session.extensionRunner = null; }],
+				["a catalog without the command", ({ session }) => { session.extensionRunner = { getRegisteredCommands: () => [] }; }],
+			];
+			for (const [name, install] of cases) {
+				await withHost(async ({ host, calls }) => {
+					await host.subagents.bind();
+					const response = await post(host, "/api/subagents/inspect", { generation: 1, id: "async-real-id" });
+					assert.equal(response.status, 503, name);
+					assert.match(response.payload.error.code, /inspect_unavailable|commands_unavailable/, name);
+					assert.deepEqual(calls.prompts, [], `${name}: no prompt may be sent when the command cannot be verified`);
+				}, {
+					setup: ({ bus, session }) => {
+						install({ session });
+						return { owner: createFakeSubagentsOwner(bus) };
+					},
+				});
+			}
+		});
+
+		it("reports a command that answers false, throws, or returns no payload", async () => {
+			const cases = [
+				["false", ({ session }) => { session.extensionRunner = { getRegisteredCommands: () => [{ invocationName: "subagents-inspect-rpc" }] }; session.onPrompt = () => false; }],
+				["throwing", ({ session }) => { installInspectCommand(session, { value: { setWidget: () => {} } }, { throws: "handler exploded" }); }],
+				["no payload", ({ session }) => { installInspectCommand(session, { value: { setWidget: () => {} } }, { answer: undefined }); }],
+			];
+			for (const [name, install] of cases) {
+				await withHost(async ({ host, calls, owner }) => {
+					await host.subagents.bind();
+					const before = owner.requests.length;
+					const response = await post(host, "/api/subagents/inspect", { generation: 1, id: "async-real-id" });
+					assert.equal(response.payload.ok, false, name);
+					assert.equal(response.status, name === "false" ? 503 : 502, name);
+					assert.equal(response.payload.error.code, name === "false" ? "inspect_unavailable" : "inspect_failed", name);
+					assert.equal(calls.prompts.length, 1, `${name} must not be retried`);
+					assert.equal(owner.requests.length, before, `${name} must not send an in-process RPC`);
+				}, {
+					setup: ({ bus, session }) => {
+						install({ session });
+						return { owner: createFakeSubagentsOwner(bus) };
+					},
+				});
+			}
+		});
+
+		it("answers a wedged command as a bounded timeout while a chat turn stays untouched", async () => {
+			const uiContextRef = { value: null };
+			await withHost(async ({ host, session, calls }) => {
+				uiContextRef.value = host.uiContext;
+				await host.subagents.bind();
+				// The session is streaming: the extension command path is still allowed and must not
+				// touch the turn that is running.
+				session.isIdle = false;
+				session.isStreaming = true;
+				session.onPrompt = () => new Promise(() => {});
+				const phaseBefore = host.chat.snapshot().phase;
+
+				const response = await post(host, "/api/subagents/inspect", { generation: 1, id: "async-real-id" });
+				assert.equal(response.status, 504);
+				assert.equal(response.payload.error.code, "inspect_timeout");
+				assert.equal(calls.prompts.length, 1, "a wedged command is not retried");
+				assert.equal(host.chat.snapshot().phase, phaseBefore, "the streaming turn keeps its phase");
+				assert.deepEqual(host.chat.snapshot().messages, [], "and gains no chat row");
+				assert.equal(host.uiContext.widgetListenerCount(), 0, "the capture subscription is released on the deadline");
+
+				// A later, working command is still answered: the slot was released.
+				session.onPrompt = (text) => {
+					const requestId = /^\/subagents-inspect-rpc (\S+)/.exec(text)[1];
+					host.uiContext.setWidget("subagent-inspect", [`PI_SUBAGENT_INSPECT_JSON:${JSON.stringify({ kind: "pi-subagents.inspect-reply", version: 1, requestId, asyncId: "async-real-id", status: "completed" })}`]);
+					host.uiContext.setWidget("subagent-inspect", undefined);
+					return undefined;
+				};
+				const second = await post(host, "/api/subagents/inspect", { generation: 1, id: "async-real-id" });
+				assert.equal(second.status, 200);
+				assert.equal(second.payload.inspect.status, "completed");
+			}, {
+				inspectTimeoutMs: 30,
+				setup: ({ bus, session }) => {
+					installInspectCommand(session, uiContextRef, { answer: new Promise(() => {}) });
+					return { owner: createFakeSubagentsOwner(bus) };
+				},
+			});
+		});
+
+		it("maps an extension error reply to its own status without inventing data", async () => {
+			const uiContextRef = { value: null };
+			await withHost(async ({ host }) => {
+				uiContextRef.value = host.uiContext;
+				await host.subagents.bind();
+				const response = await post(host, "/api/subagents/inspect", { generation: 1, id: "async-real-id" });
+				assert.equal(response.status, 403);
+				assert.equal(response.payload.ok, false);
+				assert.equal(response.payload.error.code, "foreign_session");
+				assert.match(response.payload.error.message, /current session/);
+				assert.equal("inspect" in response.payload, false, "an error reply carries no projection");
+			}, {
+				setup: ({ bus, session }) => {
+					installInspectCommand(session, uiContextRef, {
+						reply: { error: { code: "foreign_session", message: "Inspection is only available for async runs owned by the current session." } },
+					});
+					return { owner: createFakeSubagentsOwner(bus) };
+				},
+			});
 		});
 	});
 });
