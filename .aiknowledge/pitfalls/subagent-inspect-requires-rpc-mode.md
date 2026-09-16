@@ -6,7 +6,7 @@
 
 ## 反例
 
-宿主按 tui 绑定（这个模式曾是为让 `ctx.mode !== "tui"` 的扩展如 questionnaire 生效而选的）。此时 inspect 命令的 handler 命中 `if (ctx.mode === "tui") { notify("Inspection replies are emitted only on RPC surfaces."); return; }`：命令**正常返回、没有报错、也没有 widget 载荷**，宿主只能等自己的 5s 期限并报 `inspect_timeout`。现象看起来像扩展坏了或上游没实现，实际是模式不匹配。
+宿主按 tui 绑定（历史决定：当时选 tui 的理由是让 `ctx.mode !== "tui"` 的扩展如 questionnaire 生效；本 change 已明确放弃该理由，改绑 rpc）。此时 inspect 命令的 handler 命中 `if (ctx.mode === "tui") { notify("Inspection replies are emitted only on RPC surfaces."); return; }`：命令**正常返回、没有报错、也没有 widget 载荷**，宿主只能等自己的 5s 期限并报 `inspect_timeout`。现象看起来像扩展坏了或上游没实现，实际是模式不匹配。
 
 ## 正例
 

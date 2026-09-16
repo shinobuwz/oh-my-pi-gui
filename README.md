@@ -219,8 +219,11 @@ delays startup.
   session history write), and captures the `PI_SUBAGENT_INSPECT_JSON:` widget payload from the
   dedicated `subagent-inspect` key, correlating it by the host-generated `requestId`. This is
   the reason for `mode: "rpc"`: the command's handler refuses to emit on `tui` surfaces.
-- **Inspection identity, bounds and failures.** Only an async id from the current generation's
-  successful status response can be inspected (a fleet display key never can), a `childId` must
+- **Inspection identity, bounds and failures.** Only an async id the host reported can be
+  inspected: one retained by the current generation's successful status response, or one
+  attributed by a `subagent` tool result in the chat transcript (a fleet display key never
+  can). Such a chat row gets its own collapsed structured view, so a finished run stays
+  inspectable after it leaves the bounded snapshot. A `childId` must
   be a node id the current snapshot lists (a child without an id is refused, never guessed),
   and only one inspection per generation may be in flight. The command is bounded by a 5 s
   deadline (single attempt, no retry storm), the run id is validated before anything is sent,
