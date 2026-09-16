@@ -52,6 +52,18 @@
 - 现有「View transcript」（artifact 文本尾部）保留：它与结构视图语义不同，且在结构化不可用时（例如 session 文件不可读、artifact 仍在）是退路。
 - 错误、超时、`foreign_session` 等都以明确文案呈现，不显示伪造数据。
 
+### 聊天行入口（本 change 的第二段交付）
+
+- `subagent` 工具结果在 Pi 会话里带 `details.asyncId`（workflow 为 `runId`），宿主把它作为**唯一**的
+  run 身份投影进聊天行（`subagentRunId`）；`details.asyncDir` 等路径字段**永不**投影，浏览器只拿到 id。
+- 聊天行据此提供与 rail 相同的结构化视图（默认收起、点击才请求）。聊天面板使用独立的 key 空间
+  （`chat:`），与 rail 的 `run:` 互不干扰。
+- 该 id 让 inspect 路由接受它：宿主把投影出的 id 记入一个有界（64 条 FIFO）、只接受不透明 id 形状的
+  保留集，`/api/subagents/inspect` 同时接受「状态快照保留的 id」与「聊天行上报过的 id」；其余 id 仍是
+  `not_found`，fleet key 永不接受。
+- 已完成、已离开有界状态快照的 run 依然能从聊天行检视；rail 的定期重建与剪枝只作用于 `run:` 空间，
+  不得删除聊天面板的状态；响应到达时若面板状态已被清理，必须重建并展示结果，**不得静默丢弃**。
+
 ### 安全边界
 
 - 新路由同样受随机令牌 / Host / Origin / Sec-Fetch-Site / 精确 body 校验；不新增任意路径读取与任意方法调用。

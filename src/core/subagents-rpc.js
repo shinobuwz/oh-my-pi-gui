@@ -73,7 +73,12 @@ export const SUBAGENT_LIMITS = Object.freeze({
 	/** Default deadline for one structured inspection round trip. */
 	inspectTimeoutMs: 5000,
 	maxInspectChildIdChars: 256,
+	/** Chat-attributed async run ids kept inspectable outside the bounded status snapshot. */
+	maxReferencedAsyncIds: 64,
 });
+
+/** Opaque id shape accepted from the chat projection into the inspect allow-list. */
+const REFERENCED_ASYNC_ID = /^[A-Za-z0-9_-]{1,128}$/;
 
 /** Fixed transcript tail passed to every targeted status request. */
 export const SUBAGENT_DETAIL_LINES = 80;
@@ -364,6 +369,10 @@ export class SubagentsBridge {
 	#fleet = { entries: [], totalActive: 0, omitted: 0 };
 	#asyncSnapshot = { runs: [], omitted: { runs: 0, children: 0, byteLimitExceeded: false } };
 	#asyncIds = new Set();
+	/** Async run ids the chat projection attributed to a `subagent` tool result.
+	 *  Bounded and FIFO: a chat row may point at a run that already left the bounded status
+	 *  snapshot, and the page still must not be able to name ids the host never reported. */
+	#referencedAsyncIds = new Set();
 	#pending = new Set();
 	#hintSubscriptions = [];
 	#hintTimer = null;
@@ -572,6 +581,33 @@ export class SubagentsBridge {
 		this.#recoveryInFlight = promise;
 	}
 
+	/**
+	 * Record async run ids the chat projection attributed to a `subagent` tool result, so a
+	 * chat row can be inspected even when the run already left the bounded status snapshot.
+	 * Bounded and FIFO; unknown, malformed and duplicate ids are ignored.
+	 */
+	retainReferencedAsyncIds(ids) {
+		if (!Array.isArray(ids) || ids.length === 0) {
+			return 0;
+		}
+		let added = 0;
+		for (const candidate of ids) {
+			const id = safeText(candidate, SUBAGENT_LIMITS.maxKeyChars, { redactPaths: false });
+			// Only opaque id shapes are retained: a caller must not be able to park a
+			// path-looking string in the allow-list for the inspect command to carry.
+			if (!id || id !== candidate || !REFERENCED_ASYNC_ID.test(id) || this.#asyncIds.has(id) || this.#referencedAsyncIds.has(id)) {
+				continue;
+			}
+			this.#referencedAsyncIds.add(id);
+			added += 1;
+			while (this.#referencedAsyncIds.size > SUBAGENT_LIMITS.maxReferencedAsyncIds) {
+				const oldest = this.#referencedAsyncIds.values().next().value;
+				this.#referencedAsyncIds.delete(oldest);
+			}
+		}
+		return added;
+	}
+
 	/** Read one allowlisted async run transcript; never accepts a fleet key. */
 	detail(expectedGeneration, body = {}) {
 		if (!this.#active || expectedGeneration !== this.#generation) {
@@ -636,7 +672,7 @@ export class SubagentsBridge {
 			return Promise.resolve(failure("stale_generation", 409, "stale_generation", "the browser session generation is no longer current"));
 		}
 		const id = safeText(body.id, SUBAGENT_LIMITS.maxKeyChars, { redactPaths: false });
-		if (!id || !this.#asyncIds.has(id)) {
+		if (!id || !(this.#asyncIds.has(id) || this.#referencedAsyncIds.has(id))) {
 			return Promise.resolve(failure("not_found", 404, "not_found", "the requested async run is not in the current status allowlist"));
 		}
 		let childId;

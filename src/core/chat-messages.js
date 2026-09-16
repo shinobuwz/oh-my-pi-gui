@@ -210,7 +210,39 @@ function serializeContentBlocks(content) {
 	return blocks;
 }
 
+/** Upper bound for the pi-subagents run identity carried by one chat row. */
+export const MAX_SUBAGENT_RUN_ID_CHARS = 128;
+/** Run identity shape this repo's inspect route accepts; anything else is dropped, not trimmed. */
+const SUBAGENT_RUN_ID = /^[A-Za-z0-9_-]{1,128}$/;
+
+/**
+ * Run identity of a `subagent` tool result, when one can be attributed.
+ *
+ * pi-subagents returns the async run it launched in the tool result details
+ * (`details.asyncId`, or `runId` for a workflow run), which is what makes the child
+ * inspectable straight from the chat row. The artifact directory in those same details is
+ * deliberately never projected: the browser only receives the opaque id, and the inspect
+ * route re-checks it against ids the host reported before it calls anything.
+ */
+export function subagentRunId(message) {
+	if (!message || typeof message !== "object" || message.toolName !== "subagent") {
+		return null;
+	}
+	const details = message.details;
+	if (!details || typeof details !== "object") {
+		return null;
+	}
+	for (const key of ["asyncId", "runId"]) {
+		const candidate = details[key];
+		if (typeof candidate === "string" && SUBAGENT_RUN_ID.test(candidate)) {
+			return candidate;
+		}
+	}
+	return null;
+}
+
 function serializeToolResultBlock(message, { content = message?.content, isError = message?.isError === true } = {}) {
+	const runId = subagentRunId(message);
 	const text = safeTextContent(content, CHAT_LIMITS.maxToolOutputChars);
 	const rawError = typeof message?.errorMessage === "string"
 		? message.errorMessage
@@ -224,6 +256,7 @@ function serializeToolResultBlock(message, { content = message?.content, isError
 		content: text,
 		isError,
 		error: rawError ? clipText(rawError, CHAT_LIMITS.maxToolOutputChars) : isError && text ? text : null,
+		...(runId ? { subagentRunId: runId } : {}),
 	};
 }
 
@@ -257,6 +290,8 @@ export function serializeToolExecution(record) {
 	const text = safeTextContent(content, CHAT_LIMITS.maxToolOutputChars);
 	const toolCallId = clipText(record.toolCallId, 256);
 	const name = safeIdentifier(record.toolName, "tool");
+	const resultDetails = record.result && typeof record.result === "object" ? record.result.details : undefined;
+	const runId = subagentRunId({ toolName: record.toolName, details: resultDetails });
 	return {
 		id: record.id,
 		entryId: null,
@@ -265,6 +300,7 @@ export function serializeToolExecution(record) {
 		toolCallId,
 		toolName: name,
 		text,
+		...(runId ? { subagentRunId: runId } : {}),
 		blocks: [
 			{
 				type: "toolCall",
@@ -279,6 +315,7 @@ export function serializeToolExecution(record) {
 				content: text,
 				isError: record.isError === true,
 				error: toolError(record.result, record.isError === true, text),
+				...(runId ? { subagentRunId: runId } : {}),
 			},
 		],
 		isError: record.isError === true,
@@ -321,6 +358,10 @@ export function serializeMessage(message, id, entryId = null, timestamp = null) 
 		serialized.toolCallId = typeof message.toolCallId === "string" ? message.toolCallId : null;
 		serialized.toolName = typeof message.toolName === "string" ? message.toolName : null;
 		serialized.isError = message.isError === true;
+		const runId = subagentRunId(message);
+		if (runId) {
+			serialized.subagentRunId = runId;
+		}
 	}
 	return serialized;
 }

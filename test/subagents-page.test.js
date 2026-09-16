@@ -282,6 +282,125 @@ test("sends no structured inspection until the run action is clicked, then rende
 	assert.equal(page.state.subagentInspects.get("run:real-async-id").status, "done");
 });
 
+test("opens the structured view from the chat row of a subagent tool result", async () => {
+	const chatPipeline = {
+		available: true,
+		phase: "idle",
+		revision: 2,
+		lastError: null,
+		messagesFull: true,
+		historyIds: ["entry-subagent"],
+		messages: [
+			{
+				id: "entry-subagent",
+				entryId: "entry-subagent",
+				kind: "message",
+				role: "toolResult",
+				text: "Async: scout [real-async-id]",
+				subagentRunId: "real-async-id",
+				toolCallId: "call-subagent",
+				toolName: "subagent",
+				isError: false,
+				blocks: [{ type: "toolResult", name: "subagent", content: "Async: scout [real-async-id]", isError: false, subagentRunId: "real-async-id" }],
+				timestamp: 1700000002000,
+			},
+			{
+				id: "entry-bash",
+				entryId: "entry-bash",
+				kind: "message",
+				role: "toolResult",
+				text: "just a shell result",
+				toolCallId: "call-bash",
+				toolName: "bash",
+				isError: false,
+				blocks: [{ type: "toolResult", name: "bash", content: "just a shell result", isError: false }],
+				timestamp: 1700000003000,
+			},
+		],
+	};
+	const snapshot = subagentsSnapshot({ runs: [INSPECT_RUN] });
+	snapshot.chat = chatPipeline;
+	const { environment, inspectCalls } = await bootInspect({ snapshot, respond: () => inspectOk(SUCCESS_INSPECT) });
+	const rows = environment.document.getElementById("chat-history").children;
+	const subagentRow = [...rows].find((row) => row.dataset.id === "entry-subagent");
+	const bashRow = [...rows].find((row) => row.dataset.id === "entry-bash");
+
+	assert.ok(subagentRow, "the subagent tool row renders");
+	const chatPanel = subagentRow.querySelector(".subagent-inspect-chat");
+	assert.ok(chatPanel, "the chat row can open a structured view");
+	const toggle = chatPanel.querySelector(".subagent-inspect-toggle");
+	assert.equal(chatPanel.querySelector(".subagent-inspect-panel").classList.contains("hidden"), true, "the chat view starts collapsed");
+	assert.equal(bashRow.querySelector(".subagent-inspect"), null, "an ordinary tool result offers no structured view");
+	assert.equal(inspectCalls.length, 0, "rendering the chat must not request anything");
+
+	toggle.click();
+	await flushTasks();
+	assert.equal(inspectCalls.length, 1);
+	assert.deepEqual(JSON.parse(inspectCalls[0].options.body), { generation: INSPECT_GENERATION, id: "real-async-id" });
+	assert.equal(chatPanel.querySelector(".subagent-inspect-panel").classList.contains("hidden"), false);
+	assert.match(chatPanel.textContent, /structured-probe/);
+	// The chat scope keeps its own panel state: the rail view of the same run is untouched.
+	assert.equal(environment.document.getElementById("subagents-async").querySelector(".subagent-inspect-panel").classList.contains("hidden"), true);
+});
+
+test("repaints a chat structured view after the next poll rebuilt the rail", async () => {
+	// Regression: the rail clears its DOM registry on every snapshot revision. A chat panel is
+	// not rebuilt by that pass, so clearing the shared registry stranded it on "loading" even
+	// though the host had answered.
+	let release = null;
+	const chatPipeline = {
+		available: true,
+		phase: "idle",
+		revision: 2,
+		lastError: null,
+		messagesFull: true,
+		historyIds: ["entry-subagent"],
+		messages: [
+			{
+				id: "entry-subagent",
+				kind: "message",
+				role: "toolResult",
+				text: "Async: scout [real-async-id]",
+				subagentRunId: "real-async-id",
+				toolCallId: "call-subagent",
+				toolName: "subagent",
+				isError: false,
+				blocks: [{ type: "toolResult", name: "subagent", content: "Async: scout [real-async-id]", isError: false, subagentRunId: "real-async-id" }],
+				timestamp: 1700000002000,
+			},
+		],
+	};
+	const snapshot = subagentsSnapshot({ runs: [INSPECT_RUN] });
+	snapshot.chat = chatPipeline;
+	const { environment, page } = await bootInspect({
+		snapshot,
+		respond: () => new Promise((resolve) => {
+			release = () => resolve(inspectOk(SUCCESS_INSPECT));
+		}),
+	});
+	const toggle = environment.document.getElementById("chat-history").querySelector(".subagent-inspect-chat").querySelector(".subagent-inspect-toggle");
+	toggle.click();
+	await flushTasks();
+
+	// The next poll rebuilds the rail *and* the finished run leaves the bounded async snapshot,
+	// which is exactly the state a chat row survives (its panel is `chat:`-scoped, and the route
+	// accepts the id the chat row reported). Before the fix this prune dropped the answer and the
+	// panel stayed on its loading text forever.
+	environment.setSnapshot({ ...subagentsSnapshot({ revision: 5, runs: [] }), chat: { ...chatPipeline, revision: 3 } });
+	await environment.runNextTimer();
+	// The rail prune owns the `run:` key space only: a finished run leaving the snapshot must
+	// not delete the chat panel's state, or its answer would be dropped on arrival.
+	assert.equal(page.state.subagentInspects.has("chat:real-async-id"), true, "the chat entry survives the rail prune");
+	assert.equal(page.state.subagentInspectNodes.has("chat:real-async-id"), true, "the chat node stays registered");
+	assert.equal(page.state.subagentInspects.has("run:real-async-id"), false, "the rail entry for the departed run is pruned");
+	release();
+	await flushTasks();
+
+	const panel = environment.document.getElementById("chat-history").querySelector(".subagent-inspect-chat");
+	assert.match(panel.textContent, /structured-probe/, "the answered chat panel must survive the run leaving the snapshot");
+	assert.equal(/Requesting the structured view/.test(panel.textContent), false);
+});
+
 test("reports every truncation the host flags and keeps unknown task/output explicit", async () => {
 	const payload = {
 		asyncId: "real-async-id",

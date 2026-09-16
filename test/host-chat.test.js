@@ -200,6 +200,66 @@ describe("SDK host chat adapter", () => {
 		bridge.dispose();
 	});
 
+	it("carries the launched subagent run id (and no artifact path) and hands it to the inspect channel", () => {
+		const subagentResult = {
+			role: "toolResult",
+			toolCallId: "call-subagent",
+			toolName: "subagent",
+			content: [{ type: "text", text: "Async: scout [1db8e836-a469-4f37-823f-ab44b0faccf5]" }],
+			isError: false,
+			timestamp: 5,
+			details: {
+				mode: "single",
+				results: [],
+				asyncId: "1db8e836-a469-4f37-823f-ab44b0faccf5",
+				asyncDir: ["C:", "Users", "someone", ".pi", "agent", "async", "1db8e836"].join("\\"),
+			},
+		};
+		const foreignResult = {
+			role: "toolResult",
+			toolCallId: "call-bash",
+			toolName: "bash",
+			content: [{ type: "text", text: "done" }],
+			isError: false,
+			timestamp: 6,
+			details: { mode: "single", asyncId: "1db8e836-a469-4f37-823f-ab44b0faccf5" },
+		};
+		const pathOnlyResult = {
+			role: "toolResult",
+			toolCallId: "call-path",
+			toolName: "subagent",
+			content: [{ type: "text", text: "Async: scout" }],
+			isError: false,
+			timestamp: 7,
+			details: { mode: "single", asyncDir: ["C:", "Users", "someone", ".pi", "agent", "async", "x"].join("\\") },
+		};
+		const entries = [
+			{ type: "message", id: "sub-1", timestamp: new Date(5).toISOString(), message: subagentResult },
+			{ type: "message", id: "bash-1", timestamp: new Date(6).toISOString(), message: foreignResult },
+			{ type: "message", id: "path-1", timestamp: new Date(7).toISOString(), message: pathOnlyResult },
+		];
+		const fake = createFakeSdk({ idle: true, entries });
+		const handed = [];
+		const bridge = new HostChatBridge({
+			session: fake.session,
+			generation: 7,
+			logger: () => {},
+			onSubagentRunIds: (ids) => handed.push(ids),
+		});
+		const rows = bridge.snapshot().messages.filter((message) => message.role === "toolResult");
+		const subagentRow = rows.find((message) => message.toolCallId === "call-subagent");
+		assert.equal(subagentRow.subagentRunId, "1db8e836-a469-4f37-823f-ab44b0faccf5");
+		assert.equal(subagentRow.blocks[0].subagentRunId, "1db8e836-a469-4f37-823f-ab44b0faccf5");
+		// The artifact directory in those details must never reach the page.
+		assert.equal(JSON.stringify(rows).includes("asyncDir"), false);
+		assert.equal(JSON.stringify(rows).includes("someone"), false, "the artifact directory must not reach the page");
+		// Only the subagent tool names a run, and a details object without an id names none.
+		assert.equal(rows.find((message) => message.toolCallId === "call-bash").subagentRunId, undefined);
+		assert.equal(rows.find((message) => message.toolCallId === "call-path").subagentRunId, undefined);
+		assert.deepEqual(handed.flat(), ["1db8e836-a469-4f37-823f-ab44b0faccf5"]);
+		bridge.dispose();
+	});
+
 	it("serializes thinking/tool blocks with redaction and drops unknown provider blocks", () => {
 		const { bridge, session } = createBridge({ idle: false });
 		session.isIdle = false;

@@ -438,6 +438,38 @@ test("inspects one retained run (or child) with the extension command and projec
 	bridge.dispose();
 });
 
+test("keeps chat-attributed run ids inspectable without widening what the page may name", async () => {
+	const events = new FakeEvents();
+	const { runner, calls } = createRunner((_text, requestId) => ({ ok: true, line: inspectPayload(requestId) }));
+	const bridge = await bindInspectable(events, { runner });
+
+	// A run that left the bounded status snapshot is still reachable from the chat row that
+	// named it, because the chat projection attributed the id to a real subagent tool result.
+	assert.equal(await bridge.retainReferencedAsyncIds(["chat-run-id"]), 1);
+	assert.equal(bridge.retainReferencedAsyncIds(["chat-run-id"]), 0, "duplicates are ignored");
+	assert.equal(bridge.retainReferencedAsyncIds("chat-run-id"), 0, "a non-array is ignored");
+	assert.equal(bridge.retainReferencedAsyncIds([""]), 0, "an empty id is ignored");
+	assert.equal(bridge.retainReferencedAsyncIds(["../etc/passwd"]), 0, "a path-looking string is never retained");
+	assert.equal(bridge.retainReferencedAsyncIds(["has space"]), 0, "only opaque id shapes are retained");
+
+	const fromChat = await bridge.inspect(21, { generation: 21, id: "chat-run-id" });
+	assert.equal(fromChat.ok, true, "a chat-attributed id is inspectable");
+	assert.equal(fromChat.inspect.asyncId, "async-real-id");
+	assert.equal(calls.length, 1);
+
+	const stillUnknown = await bridge.inspect(21, { generation: 21, id: "never-reported" });
+	assert.equal(stillUnknown.status, 404);
+	assert.equal(stillUnknown.code, "not_found");
+	// Retention stays bounded: the oldest chat-attributed id is dropped first.
+	for (let index = 0; index < 80; index += 1) {
+		bridge.retainReferencedAsyncIds([`chat-run-${index}`]);
+	}
+	const evicted = await bridge.inspect(21, { generation: 21, id: "chat-run-id" });
+	assert.equal(evicted.status, 404, "the referenced-id window is bounded");
+	const newest = await bridge.inspect(21, { generation: 21, id: "chat-run-79" });
+	assert.equal(newest.ok, true);
+});
+
 test("refuses unknown ids, fleet keys, unknown child nodes and unusable bodies before the session", async () => {
 	const events = new FakeEvents();
 	const { runner, calls } = createRunner((_text, requestId) => ({ ok: true, line: inspectPayload(requestId) }));

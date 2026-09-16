@@ -584,17 +584,21 @@ function inspectFailureText(code, message) {
 	return { detail, line: `${label} (${code || "inspect_failed"}): ${text}` };
 }
 
-function inspectKey(runId, childId) {
-	return childId ? `run:${runId}#${childId}` : `run:${runId}`;
+const RAIL_INSPECT_KEY_PREFIX = "run:";
+const CHAT_INSPECT_KEY_PREFIX = "chat:";
+
+function inspectKey(runId, childId, prefix = "run") {
+	const scope = prefix ? `${prefix}:` : "";
+	return childId ? `${scope}${runId}#${childId}` : `${scope}${runId}`;
 }
 
-function inspectEntry(key, runId) {
+function inspectEntry(key, runId, { open = false } = {}) {
 	const existing = state.subagentInspects.get(key);
 	if (existing) {
 		existing.runId = runId;
 		return existing;
 	}
-	const entry = { runId, open: false, status: "idle", payload: null, code: null, message: null };
+	const entry = { runId, open, status: "idle", payload: null, code: null, message: null };
 	state.subagentInspects.set(key, entry);
 	return entry;
 }
@@ -805,10 +809,9 @@ async function requestInspect(nodes) {
 			setInspectFailure(nodes.key, "inspect_failed", "the host answered without a structured payload");
 			return;
 		}
-		const current = state.subagentInspects.get(nodes.key);
-		if (!current) {
-			return;
-		}
+		// A late answer must never be dropped silently: if the entry was pruned while the request
+		// was in flight, re-create it open so the panel that asked for it still shows the result.
+		const current = state.subagentInspects.get(nodes.key) ?? inspectEntry(nodes.key, entry.runId, { open: true });
 		current.status = "done";
 		current.payload = inspect;
 		current.code = null;
@@ -841,14 +844,15 @@ function toggleInspect(nodes) {
 }
 
 /** Collapsed-by-default toggle + panel for one run or one id-bearing child node. */
-function buildInspectPanel({ runId, childId = null, label }) {
-	const key = inspectKey(runId, childId);
-	inspectEntry(key, runId);
+function buildInspectPanel({ runId, childId = null, label, keyPrefix = "run" }) {
+	const key = inspectKey(runId, childId, keyPrefix);	inspectEntry(key, runId);
 	inspectPanelSeq += 1;
 	const panelId = `subagent-inspect-panel-${inspectPanelSeq}`;
 	const container = document.createElement("div");
 	container.className = "subagent-inspect";
+	container.dataset.runId = runId;
 	if (childId) {
+		container.dataset.childId = childId;
 		container.dataset.kind = "child";
 	}
 	const toggle = document.createElement("button");
@@ -1007,13 +1011,18 @@ function renderSubagents(snapshot) {
 	const asyncRuns = Array.isArray(state.subagentsSnapshot?.asyncSnapshot?.runs) ? state.subagentsSnapshot.asyncSnapshot.runs : [];
 	// The rail is rebuilt on every snapshot revision: drop the DOM registry of the previous
 	// pass and every cached structured view whose run is gone, so neither can grow unbounded.
-	state.subagentInspectNodes.clear();
+	// Only the rail's own `run:` key space is touched: a chat row owns a `chat:` panel whose
+	// node is *not* rebuilt by this pass, and whose run may legitimately have left the bounded
+	// snapshot, so clearing or pruning it here would strand it on its previous paint.
+	for (const key of [...state.subagentInspectNodes.keys()]) {
+		if (key.startsWith(RAIL_INSPECT_KEY_PREFIX)) state.subagentInspectNodes.delete(key);
+	}
 	const activeRunIds = new Set();
 	for (const run of asyncRuns) {
 		if (run && typeof run.id === "string") activeRunIds.add(run.id);
 	}
 	for (const [key, entry] of [...state.subagentInspects]) {
-		if (!activeRunIds.has(entry.runId)) state.subagentInspects.delete(key);
+		if (key.startsWith(RAIL_INSPECT_KEY_PREFIX) && !activeRunIds.has(entry.runId)) state.subagentInspects.delete(key);
 	}
 	for (const runId of [...state.subagentOpenChildren.keys()]) {
 		if (!activeRunIds.has(runId)) state.subagentOpenChildren.delete(runId);
@@ -1289,6 +1298,31 @@ function renderChatBlocks(card, message) {
 		text.className = "chat-text";
 		text.textContent = typeof message.text === "string" ? message.text : "";
 		container.append(text);
+	}
+
+	// A pi-subagents tool result names the async run it launched, so the chat row can open the
+	// same structured view the rail offers. The chat scope keeps its own panel state: the rail
+	// panel for the same run must not be repainted by this one.
+	const runId = typeof message.subagentRunId === "string" ? message.subagentRunId : null;
+	let existing = null;
+	for (const child of [...container.children]) {
+		if (child.classList?.contains("subagent-inspect")) {
+			existing = child;
+		}
+	}
+	if (runId) {
+		if (!existing || existing.dataset.runId !== runId) {
+			existing?.remove();
+			const panel = buildInspectPanel({
+				runId,
+				label: `Structured view of subagent run ${runId}`,
+				keyPrefix: CHAT_INSPECT_KEY_PREFIX.slice(0, -1),
+			});
+			panel.classList.add("subagent-inspect-chat");
+			container.append(panel);
+		}
+	} else {
+		existing?.remove();
 	}
 }
 

@@ -120,3 +120,14 @@
 - 工作组 5 由 designer 实现；Main 回读并做了两处裁决：结构化视图升为主按钮、`View transcript` 降为次要（fallback）；**面板重开一律取新快照**（原先复用旧答案，会让运行中的子代理看起来冻住），对应页面测试已同步更新为断言重开恰好再请求一次。
 - 工作组 6 的验收证据见 evidence.md（真实 host + 真实用工具子任务 + 页面自身点击 + CDP 布局/纯文本检查）。
 - 工作组 7.3 知识收口仍未执行，条目候选见 evidence.md 末节。
+
+## 8. 从聊天行进入结构化视图
+
+状态：已实现并经真实浏览器验收（工作组的验收记录见 evidence.md）
+
+- [x] 8.1 `subagent` 工具结果的 `details.asyncId`（workflow 为 `runId`）投影为聊天行的 `subagentRunId`；路径字段不投影（`src/core/chat-messages.js`）。
+- [x] 8.2 聊天投影把上报过的 id 交给 subagents 通道；inspect 路由接受「快照保留或聊天行上报」的 id，保留集有界（64，FIFO）且只收不透明 id 形状（`src/host/chat.js`、`src/host/host.js`、`src/host/subagents.js`、`src/core/subagents-rpc.js`）。
+- [x] 8.3 聊天行渲染与 rail 相同的结构化面板（`chat:` key 空间），默认收起、点击才请求（`src/browser/app.js`、`src/browser/app.css`）。
+- [x] 8.4 修复验证中发现的两个缺陷：rail 的节点注册表清理/剪枝误伤 `chat:` 面板；响应到达时 entry 已被清理则静默丢弃答案。现在 rail 只管理自己的 key 空间，迟到答案会重建 entry 并展示。
+- [x] 8.5 测试：投影（含路径不外泄与负例）、保留集（形状/去重/上界/未知 id 仍 404）、页面（聊天入口默认不发请求、点击才发、rail 剪枝后仍存活）。
+- [x] 8.6 真实浏览器验收：GUI 会话自己的模型调用 `subagent` 工具起真实后台子任务 → 聊天行出现入口 → 点击 = 1 次请求（`{"generation":1,"id":"…"}`）→ 面板显示 `task` / `messages` / `finalOutput`，无 markup 注入、无横向溢出。

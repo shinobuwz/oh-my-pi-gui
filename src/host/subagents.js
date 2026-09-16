@@ -454,6 +454,11 @@ export class HostSubagentsBridge {
 	}
 
 	/** Read one allowlisted async run transcript; never accepts a fleet key or another body field. */
+	/** Register async run ids the chat projection attributed to a subagent tool result. */
+	retainReferencedAsyncIds(ids) {
+		return this.#bridge.retainReferencedAsyncIds(ids);
+	}
+
 	details(expectedGeneration, body = {}) {
 		if (!this.#active) {
 			return Promise.resolve(failure(409, "stale_generation", "the browser session generation is no longer current"));

@@ -68,6 +68,7 @@ export class HostChatBridge {
 	#session;
 	#generation;
 	#logger;
+	#onSubagentRunIds = null;
 	#active = true;
 	#revision = 0;
 	#history = [];
@@ -80,7 +81,7 @@ export class HostChatBridge {
 	#unsubscribeSession = null;
 	#unsubscribeErrors = null;
 
-	constructor({ session, generation, logger = () => {} } = {}) {
+	constructor({ session, generation, logger = () => {}, onSubagentRunIds = null } = {}) {
 		if (!session || typeof session.prompt !== "function" || typeof session.abort !== "function" || typeof session.subscribe !== "function") {
 			throw new Error("HostChatBridge requires an AgentSession with prompt(), abort() and subscribe()");
 		}
@@ -93,6 +94,7 @@ export class HostChatBridge {
 		this.#session = session;
 		this.#generation = generation;
 		this.#logger = logger;
+		this.#onSubagentRunIds = typeof onSubagentRunIds === "function" ? onSubagentRunIds : null;
 		this.refreshFromSession();
 		this.#subscribeSession();
 		this.#subscribeCommandErrors();
@@ -287,6 +289,23 @@ export class HostChatBridge {
 			}
 		}
 		const allMessages = rawMessages.map((message) => this.#withRevision(message));
+		// pi-subagents tool results carry the async run they launched; hand those ids to the
+		// subagents channel so the page can open the structured view from the chat row too.
+		if (this.#onSubagentRunIds) {
+			const runIds = new Set();
+			for (const message of rawMessages) {
+				if (typeof message.subagentRunId === "string") {
+					runIds.add(message.subagentRunId);
+				}
+			}
+			if (runIds.size > 0) {
+				try {
+					this.#onSubagentRunIds([...runIds]);
+				} catch (error) {
+					this.#logger(`browser chat: could not hand subagent run ids to the inspect channel: ${errorMessage(error)}`);
+				}
+			}
+		}
 		const historyIds = allMessages.map((message) => message.id);
 		const since = options && typeof options === "object" && !Array.isArray(options) ? options.since : undefined;
 		const validSince = Number.isSafeInteger(since) && since >= 0 && since <= MAX_REVISION;

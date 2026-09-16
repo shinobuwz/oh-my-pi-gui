@@ -531,7 +531,15 @@ export async function startHost({
 		// Chat binds after extensions: the command catalog needs the bound extension runner,
 		// and the bridge already serves startup dialogs during binding, so `/api/state`
 		// simply carries no chat section until this point.
-		chat = lifecycle.attachChat(new HostChatBridge({ session, generation: HOST_GENERATION, logger }));
+		chat = lifecycle.attachChat(new HostChatBridge({
+			session,
+			generation: HOST_GENERATION,
+			logger,
+			// A subagent tool result names the async run it launched. Forwarding those ids keeps
+			// the structured view reachable from the chat row; the channel bounds and re-checks
+			// them, and the subagents adapter may not exist yet at this point.
+			onSubagentRunIds: (ids) => subagents?.retainReferencedAsyncIds(ids),
+		}));
 		// The read-only subagents adapter binds last: pi-subagents registers its RPC owner while
 		// its extension factory is loaded and answers once `session_start` has run, so after
 		// `bindExtensions` the first ping/status answers without waiting for a dialog. Its

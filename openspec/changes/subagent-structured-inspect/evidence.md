@@ -65,3 +65,27 @@
 ## 知识收口（待办）
 
 工作组 7.3 的有界知识维护尚未执行（需按知识契约走正式收口）：候选条目至少包括「宿主若需要结构化检视必须绑 `rpc` 模式，代价是 tui-gated 扩展降级」与「inspect payload 是单行 64KB，不能走 4000 字通用 widget 截断」。
+
+## 追加交付：聊天行入口（第二次验收）
+
+用户要求「subagent 能点击进去、展开二级内容」，为此把 `subagent` 工具结果里的 `details.asyncId` 接进聊天行（路径字段不投影），并让 inspect 路由接受这些由聊天行上报过的 id。
+
+| 表面 | 结果 |
+|---|---|
+| 聊天行入口出现 | ✅ GUI 会话自己的模型调用 `subagent` 工具起真实后台子任务后，聊天行出现入口；行内文本含 `Async: scout [<run id>]` |
+| 点击 = 1 次请求 | ✅ `{"generation":1,"id":"d45f610f-…"}`，页面收到 200（20ms），面板依次渲染 `status: complete` → TASK → `Messages · 2 shown`（user / assistant）→ `Final output OK` |
+| 纯文本与布局 | ✅ 面板内 `script` 元素 0，页面无横向溢出 |
+| 子代理仍在运行时 | ✅ 如实显示运行中空态（「its child session has no readable messages yet … normal, not a failure」），不挂起 |
+| 单测 | ✅ 274 tests / 271 pass / 0 fail / 3 opt-in skip，`npm run check` exit 0 |
+
+**验收中发现并修复的两个真实缺陷**（第二个是这一个的根因链）：
+
+1. rail 每次快照重建时无条件 `subagentInspectNodes.clear()` 并无条件按 `activeRunIds` 剪枝 `subagentInspects`。这在「只有 rail」时是对的，但会连带清掉聊天面板的节点注册与状态；当子代理完成、run 离开有界快照后，聊天面板的 entry 被删除，响应到达时 `if (!current) return;` 静默丢弃答案 → 面板永久停在 “Requesting the structured view…”。现在 rail 只清理/剪枝自己的 `run:` key 空间。
+2. 响应到达时若 entry 已不存在，原先直接 return（丢弃）。现在会重建 entry（保持展开）并渲染结果，使这一类「迟到答案消失」不再可能。
+
+诊断过程中的一个反面教训：最初的测量脚本抓着面板 DOM 引用不放，而聊天行每次 revision 都会重建，于是读到的是 detached 节点的陈旧文本，一度把问题误判成「请求挂住」。后续测量都改为每轮重新查询选择器并记录响应体/耗时，才定位到「响应 200/16ms 已到、只是没有重绘」。
+
+残余（追加）：
+- 聊天入口只对 `subagent` 工具结果生效；其它工具若也返回 `details.asyncId` 不会被采用（有意收窄）。
+- 聊天面板与 rail 面板各自持有状态（同一 run 会各请求一次）；这是为了让 rail 的定期重建不影响聊天面板。
+- 运行中检视仍可能返回 0 条消息（与 rail 入口相同的既有上限）。
