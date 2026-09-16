@@ -1,0 +1,15 @@
+{
+	"name": "oh-my-pi-gui",
+	"version": "0.0.0",
+	"private": true,
+	"type": "module",
+	"description": "Local browser interaction prototype for a live Pi session (version-limited compatibility spike)",
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"scripts": {
+		"test": "node --test --test-timeout=60000 \"test/**/*.test.js\"",
+		"test:host": "node --test --test-timeout=60000 \"test/runner-binding.test.js\" \"test/compat.test.js\"",
+		"check": "node --check src/core/request-store.js && node --check src/core/bridge-server.js && node --check src/core/bridge-registry.js && node --check src/adapter/host-package.js && node --check src/adapter/compat.js && node --check src/adapter/runner-capture.js && node --check src/adapter/ui-adapter.js && node --check src/adapter/chat-bridge.js && node --check src/adapter/model-bridge.js && node --check src/adapter/status-bridge.js && node --check src/adapter/subagents-bridge.js && node --check src/adapter/browser-bridge.js && node --check extensions/browser-interaction/index.js && node --check src/browser/app.js"
+	}
+}

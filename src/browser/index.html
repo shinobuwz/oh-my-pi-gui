@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<meta name="referrer" content="no-referrer" />
+		<title>Pi session browser UI</title>
+		<link rel="stylesheet" href="/app.css" />
+	</head>
+	<body>
+		<header>
+			<h1>Pi session prompts <span class="badge">prototype</span></h1>
+			<p id="connection" class="connection" data-state="connecting">Connecting…</p>
+			<p class="hint">
+				Answers are sent only when you submit them. Nothing is auto-approved, and losing this page does not confirm anything
+				by itself.
+			</p>
+			<form id="reload-form" class="reload-bar">
+				<button id="reload-button" type="submit">Reload Pi session</button>
+				<span id="reload-state" class="reload-state"></span>
+			</form>
+			<p class="hint">
+				Reloading restarts extensions inside the same Pi process. This page keeps its URL and token, reconnects to the new
+				binding automatically and refuses answers that belong to the previous generation.
+			</p>
+		</header>
+
+		<main>
+			<section class="panel status-panel" aria-labelledby="status-heading">
+				<div class="section-heading">
+					<h2 id="status-heading">Session status</h2>
+					<span id="status-state" class="status-state">Unavailable</span>
+				</div>
+				<dl class="session-status">
+					<div>
+						<dt>CWD</dt>
+						<dd id="status-cwd">Unknown</dd>
+					</div>
+					<div>
+						<dt>Git branch</dt>
+						<dd id="status-branch">Unknown</dd>
+					</div>
+					<div>
+						<dt>Session tokens</dt>
+						<dd id="status-tokens">Unknown</dd>
+					</div>
+					<div>
+						<dt>Context</dt>
+						<dd id="status-context">Unknown</dd>
+					</div>
+				</dl>
+			</section>
+
+			<section class="panel subagents-panel" aria-labelledby="subagents-heading">
+				<div class="section-heading">
+					<h2 id="subagents-heading">Subagents</h2>
+					<div class="subagents-heading-actions">
+						<span id="subagents-state" class="subagents-state">Unavailable</span>
+						<button id="subagents-refresh" type="button">Refresh</button>
+					</div>
+				</div>
+				<p id="subagents-status" class="subagents-status" role="status">Subagent status is unavailable.</p>
+				<div class="subagents-columns">
+					<section aria-labelledby="subagents-fleet-heading">
+						<h3 id="subagents-fleet-heading">Fleet</h3>
+						<div id="subagents-fleet" class="subagents-list"></div>
+						<p id="subagents-fleet-empty" class="empty">No fleet entries.</p>
+					</section>
+					<section aria-labelledby="subagents-async-heading">
+						<h3 id="subagents-async-heading">Async runs</h3>
+						<div id="subagents-async" class="subagents-list"></div>
+						<p id="subagents-async-empty" class="empty">No async runs.</p>
+					</section>
+				</div>
+			</section>
+
+			<section class="panel chat-panel" aria-labelledby="chat-heading">
+				<div class="section-heading">
+					<h2 id="chat-heading">Chat</h2>
+					<span id="chat-phase" class="chat-phase">Unavailable</span>
+				</div>
+				<div id="chat-history" class="chat-history" aria-live="polite"></div>
+				<p id="chat-empty" class="empty">No chat messages yet.</p>
+				<form id="chat-form" class="chat-form">
+					<label for="chat-input">Message</label>
+					<textarea id="chat-input" name="message" rows="4" maxlength="65536" placeholder="Ask the current Pi session…"></textarea>
+					<div class="chat-delivery-row">
+						<label for="chat-delivery">Delivery</label>
+						<select id="chat-delivery" name="delivery">
+							<option value="normal">Normal (idle only)</option>
+							<option value="steer">Steer (during response)</option>
+							<option value="followUp">Follow-up (after response)</option>
+						</select>
+						<span class="chat-delivery-help">Busy normal sends are rejected; queued modes are accepted separately from execution.</span>
+					</div>
+					<div class="chat-actions">
+						<button id="chat-send" class="primary" type="submit">Send</button>
+						<button id="chat-stop" type="button">Stop</button>
+					</div>
+					<p id="chat-status" class="chat-status" role="status"></p>
+				</form>
+			</section>
+
+			<section class="panel controls-panel" aria-labelledby="controls-heading">
+				<div class="section-heading">
+					<h2 id="controls-heading">Current model and thinking</h2>
+					<span id="controls-state" class="controls-state">Unavailable</span>
+				</div>
+				<p id="model-current" class="controls-current">Current model: unavailable</p>
+				<form id="model-form" class="controls-form">
+					<label for="model-select">Model candidate</label>
+					<div class="controls-row">
+						<select id="model-select" name="model" disabled></select>
+						<button id="model-apply" class="primary" type="submit" disabled>Use model</button>
+					</div>
+					<p id="model-status" class="controls-status" role="status"></p>
+				</form>
+				<form id="thinking-form" class="controls-form">
+					<label for="thinking-select">Thinking level</label>
+					<div class="controls-row">
+						<select id="thinking-select" name="thinking" disabled></select>
+						<button id="thinking-apply" class="primary" type="submit" disabled>Use thinking level</button>
+					</div>
+					<p id="thinking-status" class="controls-status" role="status"></p>
+				</form>
+				<p class="hint">Changes use the current session only. The host may clamp thinking; accepted controls never claim that a turn finished.</p>
+			</section>
+
+			<section id="auth" class="panel hidden">
+				<h2>Access token required</h2>
+				<p id="auth-message">Open the browser URL of the running Pi session.</p>
+				<form id="auth-form" autocomplete="off">
+					<label for="auth-token">Token from the URL fragment (<code>#t=…</code>)</label>
+					<input id="auth-token" name="token" type="password" spellcheck="false" autocomplete="off" />
+					<button type="submit">Use token</button>
+				</form>
+			</section>
+
+			<div id="requests"></div>
+			<p id="empty" class="empty">No pending prompts.</p>
+		</main>
+
+		<template id="card-template">
+			<article class="card" data-kind="">
+				<h2 class="card-title"></h2>
+				<p class="card-message"></p>
+				<p class="card-meta"></p>
+				<form class="card-form"></form>
+				<div class="card-actions">
+					<button type="button" class="cancel">Cancel without answering</button>
+				</div>
+				<p class="card-result" role="status"></p>
+			</article>
+		</template>
+
+		<script src="/app.js" type="module"></script>
+	</body>
+</html>

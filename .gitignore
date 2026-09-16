@@ -1,0 +1,11 @@
+# Runtime artifacts written by the browser interaction bridge while a session runs.
+.browser-ui/
+
+# Node
+node_modules/
+npm-debug.log*
+coverage/
+
+# OS
+.DS_Store
+Thumbs.db
