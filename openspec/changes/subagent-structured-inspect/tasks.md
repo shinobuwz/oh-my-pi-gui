@@ -84,13 +84,13 @@
 
 ## 7. 文档与证据收口
 
-状态：进行中（README 已改；evidence.md 已写；知识收口待办）
+状态：已完成（README、evidence.md、知识收口均已落地）
 
 依赖：工作组 6。
 
 - [x] 7.1 README：新增结构化检视的能力与边界（能得到什么、得不到什么、上限与错误语义）、mode 变更的取舍。
 - [x] 7.2 `evidence.md`：命令输出、截图/探针证据、残余清单。
-- [ ] 7.3 知识收口（按知识契约做有界维护）：把「宿主可为结构化检视改绑 rpc」与「`subagents-inspect-rpc` 的 mode gate 与边界」登记为合适 surface 的条目，避免下次重新调查。
+- [x] 7.3 知识收口（按知识契约做有界维护）：把「宿主可为结构化检视改绑 rpc」与「`subagents-inspect-rpc` 的 mode gate 与边界」登记为合适 surface 的条目，避免下次重新调查。
 
 ## 实施记录（工作组 1–4，Main 回读后的结论）
 
@@ -131,3 +131,13 @@
 - [x] 8.4 修复验证中发现的两个缺陷：rail 的节点注册表清理/剪枝误伤 `chat:` 面板；响应到达时 entry 已被清理则静默丢弃答案。现在 rail 只管理自己的 key 空间，迟到答案会重建 entry 并展示。
 - [x] 8.5 测试：投影（含路径不外泄与负例）、保留集（形状/去重/上界/未知 id 仍 404）、页面（聊天入口默认不发请求、点击才发、rail 剪枝后仍存活）。
 - [x] 8.6 真实浏览器验收：GUI 会话自己的模型调用 `subagent` 工具起真实后台子任务 → 聊天行出现入口 → 点击 = 1 次请求（`{"generation":1,"id":"…"}`）→ 面板显示 `task` / `messages` / `finalOutput`，无 markup 注入、无横向溢出。
+
+### 知识收口结果（工作组 7.3）
+
+按 `~/.opsx/common/knowledge-contract.md` 的日常维护流程（非候选审阅）执行，`captured`：
+
+- 新增 pitfall：`subagent-inspect-requires-rpc-mode.md`、`widget-capture-own-bounds.md`、`periodic-rebuild-owns-its-key-space.md`（含重审条件）。
+- 新增 codemap：`subagent-structured-inspect.md`。
+- domain：新增术语 `referenced async id`，并修订 `fleet key` 的 Relations（区分 detail 与 inspect 的 id 来源）。
+- 同步索引：`pitfalls/index.md` 7 行 = 7 个 entry、`codemap/index.md` 2 行 = 2 个 entry；自检无 orphan、无重复 active 语义、必填标题齐全。
+- 未处理：`.aiknowledge/candidates/`（10 个自动候选）按契约需显式批次确认的候选审阅，本次未读取、未采纳、未删除。
