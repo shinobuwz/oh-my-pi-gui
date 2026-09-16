@@ -15,7 +15,8 @@ point (`extensions/browser-interaction/`), the capture/rebind adapters
 `src/adapter/browser-bridge.js`, `src/adapter/compat.js`) and the shell bridges that only
 served it (`src/adapter/chat-bridge.js`, `model-bridge.js`, `status-bridge.js`,
 `subagents-bridge.js`) no longer exist. Their code and evidence remain in git history at the
-previous change's Commit A (`0959a48`, `openspec/changes/browser-interaction-spike`).
+previous change's Commit A (`0959a48`), whose change documents (spec/tasks/evidence) were
+retired after its knowledge pass; the durable lessons live in `.aiknowledge/`.
 
 The reusable pieces stay as **single implementations** in the new architecture:
 `src/core/bridge-server.js` (token/Host/Origin/bad-port self-check), `src/core/request-store.js`
@@ -478,8 +479,9 @@ reported as unsupported, the subagents panel with a real async run row, reconnec
 page reload (same prompt id, no duplicate rows), `reload_unavailable` and the security
 rejections. What is **not** covered by that run: the terminal Ctrl+C path (this machine can
 only hard-kill the process, which leaves the URL file behind while the port closes), and any
-manual step that needs a real human at a real terminal. See
-`openspec/changes/browser-gui-sdk/evidence.md` for the full acceptance table and the residual
-list, and `tasks.md` for the known residuals (extension-side session controls, startup
+manual step that needs a real human at a real terminal. See the change documents in commit
+`e885180` for the full acceptance table and the residual list, and
+`.aiknowledge/codemap/browser-gui-session-binding.md` for the current data path. The known
+residuals (extension-side session controls, startup
 liveness window, chat text not secret-redacted, acceptance fixtures not in the repo). This is a local prototype: it
 carries no release identity or license and is not intended for publication or installation.

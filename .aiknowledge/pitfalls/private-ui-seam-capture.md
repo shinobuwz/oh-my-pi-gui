@@ -14,7 +14,7 @@
 
 ## 为什么不行
 
-接缝不公开且随小版本漂移；需要精确的类身份（bundle 类与 dist 类是**不同对象**，补错一份就永远捕获不到）；仓库是 `type:module` 时宿主加载器不转译该模块图，裸 specifier 解析会失败；还必须追宿主的 attach/detach/reload 生命周期。真实成本见 `openspec/changes/browser-interaction-spike/evidence.md`（批次 #3–#7）。
+接缝不公开且随小版本漂移；需要精确的类身份（bundle 类与 dist 类是**不同对象**，补错一份就永远捕获不到）；仓库是 `type:module` 时宿主加载器不转译该模块图，裸 specifier 解析会失败；还必须追宿主的 attach/detach/reload 生命周期。真实成本见 git 历史提交 `0959a48` 的 change 文档（批次 #3–#7）。
 
 ## 适用前提
 
