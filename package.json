@@ -3,13 +3,14 @@
 	"version": "0.0.0",
 	"private": true,
 	"type": "module",
-	"description": "Local browser interaction prototype for a live Pi session (version-limited compatibility spike)",
+	"description": "Local browser GUI host for a Pi agent session (public SDK)",
 	"engines": {
 		"node": ">=22.19.0"
 	},
 	"scripts": {
+		"start": "node src/host/main.js",
 		"test": "node --test --test-timeout=60000 \"test/**/*.test.js\"",
-		"test:host": "node --test --test-timeout=60000 \"test/runner-binding.test.js\" \"test/compat.test.js\"",
-		"check": "node --check src/core/request-store.js && node --check src/core/bridge-server.js && node --check src/core/bridge-registry.js && node --check src/adapter/host-package.js && node --check src/adapter/compat.js && node --check src/adapter/runner-capture.js && node --check src/adapter/ui-adapter.js && node --check src/adapter/chat-bridge.js && node --check src/adapter/model-bridge.js && node --check src/adapter/status-bridge.js && node --check src/adapter/subagents-bridge.js && node --check src/adapter/browser-bridge.js && node --check extensions/browser-interaction/index.js && node --check src/browser/app.js"
+		"test:host": "node --test --test-timeout=60000 \"test/host-*.test.js\"",
+		"check": "node --check src/core/request-store.js && node --check src/core/bridge-server.js && node --check src/core/chat-messages.js && node --check src/core/model-catalog.js && node --check src/core/git-status.js && node --check src/core/subagents-rpc.js && node --check src/browser/app.js && node --check src/host/sdk-loader.js && node --check src/host/ui-context.js && node --check src/host/chat.js && node --check src/host/models.js && node --check src/host/status.js && node --check src/host/subagents.js && node --check src/host/host.js && node --check src/host/main.js"
 	}
 }

@@ -1,5 +1,6 @@
 /**
- * Loopback HTTP bridge for the browser interaction prototype.
+ * Loopback HTTP bridge for the browser GUI host (transport layer reused from the
+ * previous browser-interaction prototype, pinned by its own tests).
  *
  * Design constraints (see openspec/changes/browser-interaction-spike/spec.md):
  * - binds 127.0.0.1 only, on an ephemeral port

@@ -1,4 +1,4 @@
-# Runtime artifacts written by the browser interaction bridge while a session runs.
+# Runtime artifacts written by the browser GUI host while a session runs.
 .browser-ui/
 
 # Node
