@@ -1080,9 +1080,9 @@ function renderChat(chat) {
 	}
 	reorderChatCards(cards);
 	elements.chatEmpty.classList.toggle("hidden", state.chatRendered.size > 0);
-	if (state.chatRendered.size > 0) {
-		elements.chatEmpty.textContent = "No chat messages yet.";
-	}
+	// Always restore the ordinary empty-state wording: the detached wording is set by
+	// renderChat() when chat is unavailable, and this element stays hidden while rows exist.
+	elements.chatEmpty.textContent = "No chat messages yet.";
 	state.chat = chat;
 }
 

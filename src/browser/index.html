@@ -32,12 +32,13 @@
 						Reloading restarts extensions inside the same Pi process. This page keeps its URL and token, reconnects to the new
 						binding automatically and refuses answers that belong to the previous generation.
 					</li>
+					<li>Busy normal sends are rejected; queued modes are accepted separately from execution.</li>
 				</ul>
 			</details>
 
 			<main class="layout">
 				<section id="auth" class="panel hidden">
-					<h2 class="panel-title">Access token required</h2>
+					<h2 class="micro">Access token required</h2>
 					<p id="auth-message" class="lead">Open the browser URL of the running Pi session.</p>
 					<form id="auth-form" class="auth-form" autocomplete="off">
 						<label class="field-label" for="auth-token">Token from the URL fragment (<code>#t=…</code>)</label>
@@ -48,119 +49,123 @@
 					</form>
 				</section>
 
-				<section class="panel prompts-panel" aria-labelledby="prompts-heading">
-					<div class="panel-head">
-						<h2 id="prompts-heading" class="panel-title">Prompts</h2>
-						<span class="panel-note">explicit answers only</span>
+				<section class="prompts" aria-labelledby="prompts-heading">
+					<div class="micro-head">
+						<h2 id="prompts-heading" class="micro">Prompts</h2>
+						<span class="micro-note">explicit answers only</span>
 					</div>
 					<div id="requests"></div>
 					<p id="empty" class="empty">No pending prompts.</p>
 				</section>
 
-				<section class="panel chat-panel" aria-labelledby="chat-heading">
-					<div class="panel-head">
-						<h2 id="chat-heading" class="panel-title">Chat</h2>
-						<span id="chat-phase" class="chat-phase">Unavailable</span>
-					</div>
-					<div id="chat-history" class="chat-history" aria-live="polite"></div>
-					<p id="chat-empty" class="empty">No chat messages yet.</p>
-					<form id="chat-form" class="chat-form">
-						<label class="field-label" for="chat-input">Message</label>
-						<textarea id="chat-input" name="message" rows="4" maxlength="65536" placeholder="Ask the current Pi session…"></textarea>
-						<div class="chat-delivery-row">
-							<label class="field-label" for="chat-delivery">Delivery</label>
-							<span class="select">
-								<select id="chat-delivery" name="delivery">
-									<option value="normal">Normal (idle only)</option>
-									<option value="steer">Steer (during response)</option>
-									<option value="followUp">Follow-up (after response)</option>
-								</select>
-							</span>
-							<span class="chat-delivery-help">Busy normal sends are rejected; queued modes are accepted separately from execution.</span>
+				<div class="workspace">
+					<section class="chat" aria-labelledby="chat-heading">
+						<div class="micro-head">
+							<h2 id="chat-heading" class="micro">Chat</h2>
+							<span id="chat-phase" class="chat-phase">Unavailable</span>
 						</div>
-						<div class="chat-actions">
-							<button id="chat-send" class="primary" type="submit">Send</button>
-							<button id="chat-stop" type="button">Stop</button>
+						<div id="chat-history" class="chat-history" aria-live="polite">
+							<p id="chat-empty" class="empty">No chat messages yet.</p>
+						</div>
+						<div class="composer">
+							<form id="chat-form" class="composer-form">
+								<label class="sr-only" for="chat-input">Message</label>
+								<textarea id="chat-input" name="message" rows="3" maxlength="65536" placeholder="Ask the current Pi session…"></textarea>
+							</form>
+							<div class="composer-foot">
+								<details id="model-chip" class="chip">
+									<summary class="chip-toggle">
+										<span id="model-current" class="chip-model">Current model: unavailable</span>
+										<span id="controls-state" class="controls-state">Unavailable</span>
+									</summary>
+									<div class="chip-body">
+										<h2 id="controls-heading" class="micro">Model and thinking</h2>
+										<form id="model-form" class="controls-form">
+											<label class="field-label" for="model-select">Model candidate</label>
+											<div class="controls-row">
+												<span class="select"><select id="model-select" name="model" disabled></select></span>
+												<button id="model-apply" class="primary" type="submit" disabled>Use model</button>
+											</div>
+											<p id="model-status" class="controls-status" role="status"></p>
+										</form>
+										<form id="thinking-form" class="controls-form">
+											<label class="field-label" for="thinking-select">Thinking level</label>
+											<div class="controls-row">
+												<span class="select"><select id="thinking-select" name="thinking" disabled></select></span>
+												<button id="thinking-apply" class="primary" type="submit" disabled>Use thinking level</button>
+											</div>
+											<p id="thinking-status" class="controls-status" role="status"></p>
+										</form>
+										<p class="hint">Changes use the current session only. The host may clamp thinking; accepted controls never claim a turn finished.</p>
+									</div>
+								</details>
+								<span class="select select-flat">
+									<select id="chat-delivery" name="delivery" form="chat-form">
+										<option value="normal">Normal (idle only)</option>
+										<option value="steer">Steer (during response)</option>
+										<option value="followUp">Follow-up (after response)</option>
+									</select>
+								</span>
+								<div class="composer-actions">
+									<button id="chat-stop" type="button">Stop</button>
+									<button id="chat-send" class="primary" type="submit" form="chat-form">Send</button>
+								</div>
+							</div>
 						</div>
 						<p id="chat-status" class="chat-status" role="status"></p>
-					</form>
-				</section>
-
-				<div class="panes">
-					<section class="panel status-panel" aria-labelledby="status-heading">
-						<div class="panel-head">
-							<h2 id="status-heading" class="panel-title">Session status</h2>
-							<span id="status-state" class="status-state">Unavailable</span>
-						</div>
-						<dl class="session-status">
-							<div>
-								<dt>CWD</dt>
-								<dd id="status-cwd">Unknown</dd>
-							</div>
-							<div>
-								<dt>Git branch</dt>
-								<dd id="status-branch">Unknown</dd>
-							</div>
-							<div>
-								<dt>Session tokens</dt>
-								<dd id="status-tokens">Unknown</dd>
-							</div>
-							<div>
-								<dt>Context</dt>
-								<dd id="status-context">Unknown</dd>
-							</div>
-						</dl>
 					</section>
 
-					<section class="panel controls-panel" aria-labelledby="controls-heading">
-						<div class="panel-head">
-							<h2 id="controls-heading" class="panel-title">Model and thinking</h2>
-							<span id="controls-state" class="controls-state">Unavailable</span>
-						</div>
-						<p id="model-current" class="controls-current">Current model: unavailable</p>
-						<div class="controls-forms">
-							<form id="model-form" class="controls-form">
-								<label class="field-label" for="model-select">Model candidate</label>
-								<div class="controls-row">
-									<span class="select"><select id="model-select" name="model" disabled></select></span>
-									<button id="model-apply" class="primary" type="submit" disabled>Use model</button>
-								</div>
-								<p id="model-status" class="controls-status" role="status"></p>
-							</form>
-							<form id="thinking-form" class="controls-form">
-								<label class="field-label" for="thinking-select">Thinking level</label>
-								<div class="controls-row">
-									<span class="select"><select id="thinking-select" name="thinking" disabled></select></span>
-									<button id="thinking-apply" class="primary" type="submit" disabled>Use thinking level</button>
-								</div>
-								<p id="thinking-status" class="controls-status" role="status"></p>
-							</form>
-						</div>
-						<p class="hint">Changes use the current session only. The host may clamp thinking; accepted controls never claim a turn finished.</p>
-					</section>
+					<aside class="rail" aria-label="Session details">
+						<details class="rail-card" aria-labelledby="status-heading">
+							<summary class="rail-head">
+								<h2 id="status-heading" class="micro">Session status</h2>
+								<span id="status-state" class="status-state">Unavailable</span>
+								<span class="rail-line">
+									<span class="sr-only">Git branch</span>
+									<span id="status-branch" class="rail-value">Unknown</span>
+									<span class="sr-only">Context</span>
+									<span id="status-context" class="rail-value">tokens Unknown · window Unknown · usage Unknown</span>
+								</span>
+							</summary>
+							<div class="rail-body">
+								<dl class="session-status">
+									<div>
+										<dt>CWD</dt>
+										<dd id="status-cwd">Unknown</dd>
+									</div>
+									<div>
+										<dt>Session tokens</dt>
+										<dd id="status-tokens">Unknown</dd>
+									</div>
+								</dl>
+							</div>
+						</details>
 
-					<section class="panel subagents-panel" aria-labelledby="subagents-heading">
-						<div class="panel-head">
-							<h2 id="subagents-heading" class="panel-title">Subagents</h2>
-							<div class="subagents-heading-actions">
+						<details class="rail-card" aria-labelledby="subagents-heading">
+							<summary class="rail-head">
+								<h2 id="subagents-heading" class="micro">Subagents</h2>
 								<span id="subagents-state" class="subagents-state">Unavailable</span>
-								<button id="subagents-refresh" type="button">Refresh</button>
+								<span id="subagents-status" class="subagents-status" role="status">Subagent status is unavailable.</span>
+							</summary>
+							<div class="rail-body">
+								<div class="rail-actions">
+									<button id="subagents-refresh" type="button">Refresh</button>
+								</div>
+								<div class="subagents-columns">
+									<section class="subagents-column" aria-labelledby="subagents-fleet-heading">
+										<h3 id="subagents-fleet-heading" class="column-title">Fleet</h3>
+										<div id="subagents-fleet" class="subagents-list"></div>
+										<p id="subagents-fleet-empty" class="empty">No fleet entries.</p>
+									</section>
+									<section class="subagents-column" aria-labelledby="subagents-async-heading">
+										<h3 id="subagents-async-heading" class="column-title">Async runs</h3>
+										<div id="subagents-async" class="subagents-list"></div>
+										<p id="subagents-async-empty" class="empty">No async runs.</p>
+									</section>
+								</div>
 							</div>
-						</div>
-						<p id="subagents-status" class="subagents-status" role="status">Subagent status is unavailable.</p>
-						<div class="subagents-columns">
-							<section class="subagents-column" aria-labelledby="subagents-fleet-heading">
-								<h3 id="subagents-fleet-heading" class="column-title">Fleet</h3>
-								<div id="subagents-fleet" class="subagents-list"></div>
-								<p id="subagents-fleet-empty" class="empty">No fleet entries.</p>
-							</section>
-							<section class="subagents-column" aria-labelledby="subagents-async-heading">
-								<h3 id="subagents-async-heading" class="column-title">Async runs</h3>
-								<div id="subagents-async" class="subagents-list"></div>
-								<p id="subagents-async-empty" class="empty">No async runs.</p>
-							</section>
-						</div>
-					</section>
+						</details>
+					</aside>
 				</div>
 			</main>
 		</div>
