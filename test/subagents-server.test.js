@@ -57,6 +57,19 @@ async function withBridge(run, overrides = {}) {
 				},
 			};
 		},
+		sessionSubagentsSession: async (generation, body) => {
+			calls.push(["session", generation, body]);
+			return {
+				ok: true,
+				generation,
+				id: body.id,
+				index: body.index ?? 0,
+				messages: [{ id: "child-1", role: "assistant", text: "child content", blocks: [] }],
+				earlier: body.before === undefined,
+				cursor: body.before === undefined ? 3 : null,
+				window: { records: 3, skipped: 1, truncatedHead: false, limit: 40 },
+			};
+		},
 	};
 	const bridge = await startBridgeServer({ store: new RequestStore(), assetsDir: ASSETS_DIR, control: { ...control, ...overrides } });
 	try {
@@ -117,6 +130,43 @@ test("rejects cross-site, stale, extra-field and arbitrary subagent requests bef
 		});
 		assert.equal(missingAuth.status, 401);
 		assert.equal(calls.length, 0);
+	});
+});
+
+test("routes the child session page with an exact body and bounded cursor/index", async () => {
+	await withBridge(async ({ bridge, calls }) => {
+		const first = await post(bridge, "/api/subagents/session", { generation: 5, id: "real-async-id" });
+		assert.equal(first.status, 200);
+		assert.deepEqual(await first.json(), {
+			ok: true,
+			generation: 5,
+			id: "real-async-id",
+			index: 0,
+			messages: [{ id: "child-1", role: "assistant", text: "child content", blocks: [] }],
+			earlier: true,
+			cursor: 3,
+			window: { records: 3, skipped: 1, truncatedHead: false, limit: 40 },
+		});
+		assert.deepEqual(calls[0], ["session", 5, { generation: 5, id: "real-async-id" }]);
+
+		const older = await post(bridge, "/api/subagents/session", { generation: 5, id: "real-async-id", index: 2, before: 3 });
+		assert.equal(older.status, 200);
+		assert.deepEqual(calls[1], ["session", 5, { generation: 5, id: "real-async-id", index: 2, before: 3 }]);
+
+		for (const [body, name] of [
+			[{ generation: 5, id: "real-async-id", index: -1 }, "negative index"],
+			[{ generation: 5, id: "real-async-id", index: 65 }, "index over bound"],
+			[{ generation: 5, id: "real-async-id", index: 1.5 }, "fractional index"],
+			[{ generation: 5, id: "real-async-id", before: 0 }, "zero cursor"],
+			[{ generation: 5, id: "real-async-id", before: 2001 }, "cursor over bound"],
+			[{ generation: 5, id: "real-async-id", before: 1.5 }, "fractional cursor"],
+			[{ generation: 5, id: "real-async-id", extra: true }, "extra field"],
+		]) {
+			const refused = await post(bridge, "/api/subagents/session", body);
+			assert.equal(refused.status, 400, name);
+			assert.equal((await refused.json()).error.code, "invalid_body", name);
+		}
+		assert.equal(calls.length, 2, "invalid child-session requests never reach control");
 	});
 });
 

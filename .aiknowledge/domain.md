@@ -22,4 +22,12 @@
 
 **Avoid**：不要理解为「任意外部 run id 都可查」，也不要当作 fleet key 使用；它只为已经出现在本会话 UI 里的 run 服务。
 
-**Relations**：有界（64 条 FIFO）、只接受不透明 id 形状；不因离开状态快照而失效；`details.asyncDir` 等路径字段永不投影到浏览器。
+**Relations**：有界（64 条 FIFO）、只接受不透明 id 形状；不因离开状态快照而失效；`details.asyncDir` 等路径字段永不投影到浏览器。上游解析失败时检视路由会追问一次 `status` 转写，所以同一个 id 可能答结构化视图，也可能答 `{kind:"transcript"}`（见 foreground run）。
+
+## foreground run
+
+**Meaning**：由 `subagent` 工具**阻塞**派发的子代理运行（single/parallel/chain）。它不在 async 快照里，pi-subagents 的 `/subagents-inspect-rpc` 按设计拒绝它（回 `not_found`），但它的 `status` 动作可以答：运行中给 live foreground 转写，结束且仍在内存时给状态/子节点/结果尾部文本。
+
+**Avoid**：不要把它当 async run——async 快照为空、fleet DTO 没有 `state`/`role` 字段都是正常的，不代表面板坏了；也不要用 fleet 展示 key 去查它（那永远是纯展示值）。
+
+**Relations**：run id 随**工具结果**（`details.runId`）才到页面，所以运行中的前台子代理无法被命名/观看，只有跑完后的聊天行能进去；Inspect 先拿 `status` 转写，再由宿主按 parent `.jsonl` 派生 `<parent session id>/<runId>/run-0/session.jsonl`，有文件时补全 thinking/tool arguments/results。页面当前只请求 index 0；alternate `sessionDir`、其它 child index 和 Pi 重启后的上游 allow-list 遗失都如实返回 unavailable/not_found，不扫描、不猜路径。

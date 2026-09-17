@@ -17,6 +17,7 @@ import { readFile } from "node:fs/promises";
 import { extname, join } from "node:path";
 import { INSPECT_LIMITS } from "./inspect-reply.js";
 import { LIMITS } from "./request-store.js";
+import { SUBAGENT_SESSION_LIMITS } from "./subagent-session.js";
 
 const HOST = "127.0.0.1";
 
@@ -258,10 +259,11 @@ const POST_BODY_KEYS = Object.freeze({
 	"/api/subagents/details": Object.freeze(["generation", "id"]),
 	"/api/subagents/refresh": Object.freeze(["generation"]),
 	"/api/subagents/inspect": Object.freeze(["generation", "id", "childId", "lines"]),
+	"/api/subagents/session": Object.freeze(["generation", "id", "index", "before"]),
 });
 
-/** Route paths of the read-only subagents slice (details / structured inspect / refresh). */
-const SUBAGENT_ROUTES = Object.freeze(["/api/subagents/details", "/api/subagents/refresh", "/api/subagents/inspect"]);
+/** Route paths of the read-only subagents slice (details / inspect / child session / refresh). */
+const SUBAGENT_ROUTES = Object.freeze(["/api/subagents/details", "/api/subagents/refresh", "/api/subagents/inspect", "/api/subagents/session"]);
 
 /** Create an unpredictable per-session bearer token. */
 export function createBridgeToken() {
@@ -355,6 +357,7 @@ const NO_LIFECYCLE = Object.freeze({
 	sessionThinking: async () => ({ ok: false, status: 503, code: "not_attached", message: "the browser thinking controls are not attached to a session" }),
 	sessionSubagentsDetails: async () => ({ ok: false, status: 503, code: "not_attached", message: "the browser subagent status is not attached to a session" }),
 	sessionSubagentsInspect: async () => ({ ok: false, status: 503, code: "not_attached", message: "the browser subagent status is not attached to a session" }),
+	sessionSubagentsSession: async () => ({ ok: false, status: 503, code: "not_attached", message: "the browser subagent status is not attached to a session" }),
 	sessionSubagentsRefresh: async () => ({ ok: false, status: 503, code: "not_attached", message: "the browser subagent status is not attached to a session" }),
 });
 
@@ -413,7 +416,7 @@ function closeBridgeServer(server) {
  * @param {import("./request-store.js").RequestStore} options.store
  * @param {string} options.assetsDir directory holding the classic page files and/or a Vite `assets/` folder
  * @param {string} [options.token]
- * @param {{ snapshot: () => { generation: number, reloading: boolean }, reload: () => Promise<{ ok: boolean, status?: number, code?: string, message?: string, generation?: number }>, sessionSnapshot?: (options?: { chatSince?: number }) => object | null, sessionMessage?: (generation: number, body: object) => Promise<{ ok: boolean, status?: number, code?: string, message?: string, [key: string]: unknown }>, sessionStop?: (generation: number, body: object) => Promise<{ ok: boolean, status?: number, code?: string, message?: string, [key: string]: unknown }>, sessionModel?: (generation: number, body: object) => Promise<{ ok: boolean, status?: number, code?: string, message?: string, [key: string]: unknown }>, sessionThinking?: (generation: number, body: object) => Promise<{ ok: boolean, status?: number, code?: string, message?: string, [key: string]: unknown }>, sessionSubagentsDetails?: (generation: number, body: object) => Promise<{ ok: boolean, status?: number, code?: string, message?: string, [key: string]: unknown }>, sessionSubagentsInspect?: (generation: number, body: object) => Promise<{ ok: boolean, status?: number, code?: string, message?: string, [key: string]: unknown }>, sessionSubagentsRefresh?: (generation: number, body: object) => Promise<{ ok: boolean, status?: number, code?: string, message?: string, [key: string]: unknown }> }} [options.control]
+ * @param {{ snapshot: () => { generation: number, reloading: boolean }, reload: () => Promise<{ ok: boolean, status?: number, code?: string, message?: string, generation?: number }>, sessionSnapshot?: (options?: { chatSince?: number }) => object | null, sessionMessage?: (generation: number, body: object) => Promise<{ ok: boolean, status?: number, code?: string, message?: string, [key: string]: unknown }>, sessionStop?: (generation: number, body: object) => Promise<{ ok: boolean, status?: number, code?: string, message?: string, [key: string]: unknown }>, sessionModel?: (generation: number, body: object) => Promise<{ ok: boolean, status?: number, code?: string, message?: string, [key: string]: unknown }>, sessionThinking?: (generation: number, body: object) => Promise<{ ok: boolean, status?: number, code?: string, message?: string, [key: string]: unknown }>, sessionSubagentsDetails?: (generation: number, body: object) => Promise<{ ok: boolean, status?: number, code?: string, message?: string, [key: string]: unknown }>, sessionSubagentsInspect?: (generation: number, body: object) => Promise<{ ok: boolean, status?: number, code?: string, message?: string, [key: string]: unknown }>, sessionSubagentsSession?: (generation: number, body: object) => Promise<{ ok: boolean, status?: number, code?: string, message?: string, [key: string]: unknown }>, sessionSubagentsRefresh?: (generation: number, body: object) => Promise<{ ok: boolean, status?: number, code?: string, message?: string, [key: string]: unknown }> }} [options.control]
  * @param {(handler: (req: import("node:http").IncomingMessage, res: import("node:http").ServerResponse) => void) => import("node:http").Server} [options.createServer] injectable server factory for binding tests
  * @param {(server: import("node:http").Server, options: object, onListening: () => void) => void} [options.listen] injectable listen seam for binding tests
  * @param {(input: string, init?: object) => Promise<Response>} [options.fetch] injectable client fetch seam for binding tests
@@ -613,7 +616,9 @@ export async function startBridgeServer({
 					? "subagent details only accept generation and id"
 					: pathname === "/api/subagents/inspect"
 						? "subagent inspection only accepts generation, id, childId and lines"
-						: "subagent refresh only accepts generation",
+						: pathname === "/api/subagents/session"
+							? "a child session request only accepts generation, id, index and before"
+							: "subagent refresh only accepts generation",
 			)) {
 				return;
 			}
@@ -629,11 +634,16 @@ export async function startBridgeServer({
 			if (pathname === "/api/subagents/inspect" && !validateInspectBody(res, body)) {
 				return;
 			}
+			if (pathname === "/api/subagents/session" && !validateChildSessionBody(res, body)) {
+				return;
+			}
 			const sessionMethod = pathname === "/api/subagents/details"
 				? "sessionSubagentsDetails"
 				: pathname === "/api/subagents/inspect"
 					? "sessionSubagentsInspect"
-					: "sessionSubagentsRefresh";
+					: pathname === "/api/subagents/session"
+						? "sessionSubagentsSession"
+						: "sessionSubagentsRefresh";
 			if (typeof control[sessionMethod] !== "function") {
 				sendError(res, 503, "not_attached", "the browser subagent status is not attached to a session");
 				return;
@@ -833,6 +843,27 @@ export async function startBridgeServer({
 			&& (!Number.isInteger(body.lines) || body.lines < INSPECT_LIMITS.minLines || body.lines > INSPECT_LIMITS.maxLines)
 		) {
 			sendError(res, 400, "invalid_body", `lines must be an integer between ${INSPECT_LIMITS.minLines} and ${INSPECT_LIMITS.maxLines}`);
+			return false;
+		}
+		return true;
+	}
+
+	/**
+	 * Type/range checks for the child session body: the run id is only *shape*-checked here
+	 * (the bridge's allow-list decides which ids exist), while the index and the cursor are the
+	 * two numbers the reader derives a path and a window from.
+	 */
+	function validateChildSessionBody(res, body) {
+		if (typeof body.id !== "string" || body.id.length === 0 || body.id.length > INSPECT_LIMITS.maxRunIdChars) {
+			sendError(res, 400, "invalid_body", "a child session request requires a non-empty run id");
+			return false;
+		}
+		if (body.index !== undefined && (!Number.isSafeInteger(body.index) || body.index < 0 || body.index > SUBAGENT_SESSION_LIMITS.maxChildIndex)) {
+			sendError(res, 400, "invalid_body", `a child index must be an integer between 0 and ${SUBAGENT_SESSION_LIMITS.maxChildIndex}`);
+			return false;
+		}
+		if (body.before !== undefined && (!Number.isSafeInteger(body.before) || body.before <= 0 || body.before > SUBAGENT_SESSION_LIMITS.maxRecords)) {
+			sendError(res, 400, "invalid_body", `before must be a positive cursor no greater than ${SUBAGENT_SESSION_LIMITS.maxRecords}`);
 			return false;
 		}
 		return true;

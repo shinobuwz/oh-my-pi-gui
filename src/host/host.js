@@ -228,6 +228,9 @@ export function createHostLifecycle({ generation = HOST_GENERATION } = {}) {
 		sessionSubagentsInspect: (expectedGeneration, body) => (subagents
 			? subagents.inspect(expectedGeneration, body)
 			: Promise.resolve(notAttachedSubagents())),
+		sessionSubagentsSession: (expectedGeneration, body) => (subagents
+			? subagents.session(expectedGeneration, body)
+			: Promise.resolve(notAttachedSubagents())),
 		sessionSubagentsRefresh: (expectedGeneration, body) => (subagents
 			? subagents.refresh(expectedGeneration, body)
 			: Promise.resolve(notAttachedSubagents())),
@@ -557,6 +560,9 @@ export async function startHost({
 				// touches the chat bridge or the model.
 				session,
 				uiContext,
+				// The child session reader derives its path from the parent session file, which
+				// only exists once the session does — hence a getter instead of a value.
+				getSessionFile: () => readSessionFile(session),
 				...(Number.isFinite(subagentsTimeoutMs) && subagentsTimeoutMs > 0 ? { timeoutMs: subagentsTimeoutMs } : {}),
 				...(Number.isFinite(subagentsEventDebounceMs) && subagentsEventDebounceMs >= 0 ? { eventDebounceMs: subagentsEventDebounceMs } : {}),
 				...(Number.isFinite(subagentsInspectTimeoutMs) && subagentsInspectTimeoutMs > 0 ? { inspectTimeoutMs: subagentsInspectTimeoutMs } : {}),

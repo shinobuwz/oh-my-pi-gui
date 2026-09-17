@@ -140,7 +140,7 @@ test("keeps timeout, RPC error, and omitted data visibly distinct", async () => 
 
 const INSPECT_GENERATION = 3;
 
-function subagentsSnapshot({ revision = 4, runs = [] } = {}) {
+function subagentsSnapshot({ revision = 4, runs = [], fleetEntries = [], state = "ready-data", referencedRuns = 0 } = {}) {
 	return {
 		revision,
 		generation: INSPECT_GENERATION,
@@ -148,9 +148,10 @@ function subagentsSnapshot({ revision = 4, runs = [] } = {}) {
 		reloading: false,
 		subagents: {
 			available: true,
-			state: "ready-data",
+			state,
 			revision,
-			fleet: { entries: [], omitted: 0 },
+			referencedRuns,
+			fleet: { entries: fleetEntries, omitted: 0 },
 			asyncSnapshot: { runs, omitted: { runs: 0, children: 0, byteLimitExceeded: false } },
 		},
 	};
@@ -165,7 +166,22 @@ const INSPECT_RUN = {
 };
 
 /** Boot the page with a subagents snapshot and an inspect stub layered over the real fetch. */
-async function bootInspect({ snapshot = subagentsSnapshot({ runs: [INSPECT_RUN] }), respond } = {}) {
+const CHILD_RECORDS = [
+	{ id: "child-1", kind: "message", role: "user", text: "Task: 只回复 OK", blocks: [{ type: "text", text: "Task: 只回复 OK" }], timestamp: 1 },
+	{
+		id: "child-2",
+		kind: "message",
+		role: "assistant",
+		text: "",
+		blocks: [
+			{ type: "thinking", text: "The task is trivial." },
+			{ type: "toolCall", name: "read", arguments: '{"path":"src/browser/app.css"}' },
+		],
+		timestamp: 2,
+	},
+];
+
+async function bootInspect({ snapshot = subagentsSnapshot({ runs: [INSPECT_RUN] }), respond, sessionRespond } = {}) {
 	const environment = createFakeEnvironment({ token: "d".repeat(64) });
 	environment.setSnapshot({ revision: 1, generation: INSPECT_GENERATION, pending: [], reloading: false });
 	restore = installPageGlobals(environment);
@@ -174,6 +190,7 @@ async function bootInspect({ snapshot = subagentsSnapshot({ runs: [INSPECT_RUN] 
 	environment.setSnapshot(snapshot);
 	await environment.runNextTimer();
 	const inspectCalls = [];
+	const sessionCalls = [];
 	const originalFetch = environment.fetch;
 	environment.fetch = async (path, options = {}) => {
 		environment.fetchCalls.push({ path, options });
@@ -181,10 +198,17 @@ async function bootInspect({ snapshot = subagentsSnapshot({ runs: [INSPECT_RUN] 
 			inspectCalls.push({ path, options });
 			return respond(options, inspectCalls.length);
 		}
+		if (path === "/api/subagents/session") {
+			sessionCalls.push({ path, options });
+			const answer = sessionRespond
+				? sessionRespond(options, sessionCalls.length)
+				: { ok: true, status: 200, json: async () => ({ ok: true, generation: INSPECT_GENERATION, id: "real-async-id", index: 0, messages: CHILD_RECORDS, earlier: false, cursor: null, window: { fileBytes: 4096, truncatedHead: false, records: 2, skipped: 1, limit: 40 } }) };
+			return answer;
+		}
 		return originalFetch(path, options);
 	};
 	globalThis.fetch = environment.fetch;
-	return { environment, page, inspectCalls };
+	return { environment, page, inspectCalls, sessionCalls };
 }
 
 function inspectOk(inspect) {
@@ -222,7 +246,7 @@ test("sends no structured inspection until the run action is clicked, then rende
 	const panel = card.querySelector(".subagent-inspect-panel");
 
 	assert.equal(inspectCalls.length, 0, "the rail must not request a structured view while rendering");
-	assert.equal(toggle.textContent, "Structured view");
+	assert.equal(toggle.textContent, "Inspect");
 	assert.equal(toggle.getAttribute("aria-expanded"), "false");
 	assert.equal(panel.classList.contains("hidden"), true, "the panel starts collapsed");
 	assert.equal(card.querySelector(".subagent-detail"), null, "the transcript stays an explicit action too");
@@ -517,7 +541,7 @@ test("offers the structured view only for child nodes that have an id", async ()
 
 	const withId = children[0];
 	const withoutId = children[1];
-	assert.equal(withId.querySelector(".subagent-inspect-toggle").textContent, "Structured view");
+	assert.equal(withId.querySelector(".subagent-inspect-toggle").textContent, "Inspect");
 	assert.match(withId.textContent, /id step:0/);
 	assert.equal(withoutId.querySelector(".subagent-inspect"), null, "an id-less node must not get an action");
 	assert.equal(withoutId.querySelector(".subagent-inspect-toggle"), null);
@@ -556,4 +580,122 @@ test("keeps an answered structured view when the rail is rebuilt by the next pol
 	assert.equal(toggle.getAttribute("aria-expanded"), "true");
 	assert.equal(rebuilt.querySelector(".subagent-inspect-panel").classList.contains("hidden"), false);
 	assert.match(rebuilt.querySelector(".subagent-inspect-panel").textContent, /structured-probe/);
+});
+
+test("renders a foreground run's transcript instead of pretending a structured view exists", async () => {
+	const transcript = "Run: real-async-id\nState: live foreground\nTool: read (ok)\nReview <safe>";
+	const { environment, inspectCalls } = await bootInspect({
+		respond: () => inspectOk({ kind: "transcript", runId: "real-async-id", lines: 20, text: transcript }),
+	});
+	const card = runCard(environment);
+	const toggle = card.querySelector(".subagent-inspect-toggle");
+	toggle.click();
+	await flushTasks();
+	assert.equal(inspectCalls.length, 1);
+	const panel = card.querySelector(".subagent-inspect-panel");
+	assert.equal(toggle.textContent, "Hide inspector");
+	assert.equal(panel.querySelector(".subagent-inspect-task"), null, "a transcript payload has no task section");
+	assert.equal(panel.querySelector(".subagent-inspect-final"), null);
+	assert.equal(panel.querySelectorAll(".subagent-inspect-message").length, 0);
+	assert.equal(panel.querySelector(".subagent-inspect-transcript").textContent, transcript);
+	assert.match(panel.textContent, /blocking \(foreground\) delegation/);
+	assert.match(panel.textContent, /run: real-async-id/, "the meta line names the run it inspected");
+	assert.equal(/\bUnknown\b/.test(panel.textContent), false, "a transcript must not invent missing fields");
+});
+
+test("renders only the fleet fields pi-subagents publishes, plus the child's live context", async () => {
+	const { environment } = await bootInspect({
+		snapshot: subagentsSnapshot({
+			fleetEntries: [
+				{ key: "fleet-1", agent: "scout", startedAt: 1700000000000, tokens: { input: 18000, output: 2100, total: 20000, window: 42000, windowPeak: 58000 } },
+				{ key: "fleet-2", agent: "worker", role: "review", model: "provider/model", effort: "max", startedAt: 1700000000000 },
+			],
+		}),
+		respond: () => inspectOk(SUCCESS_INSPECT),
+	});
+	const entries = environment.document.getElementById("subagents-fleet").children;
+	assert.equal(entries.length, 2);
+	const [withoutOptionalFields, withOptionalFields] = entries;
+	assert.match(withoutOptionalFields.textContent, /agent: scout/);
+	assert.match(withoutOptionalFields.textContent, /tokens: in 18k · out 2\.1k · total 20k · context 42k · peak 58k/);
+	assert.equal(/role:/.test(withoutOptionalFields.textContent), false, "an absent role is not rendered at all");
+	assert.equal(/state:/.test(withoutOptionalFields.textContent), false, "the fleet DTO has no state field to render");
+	assert.equal(/\bUnknown\b/.test(withoutOptionalFields.textContent), false, "missing fields must never be rendered as Unknown");
+	assert.match(withOptionalFields.textContent, /role: review · model: provider\/model · effort: max/);
+	assert.equal(/\bUnknown\b/.test(withOptionalFields.textContent), false);
+});
+
+test("says where chat-attributed runs stay readable when nothing is active any more", async () => {
+	const { environment } = await bootInspect({
+		snapshot: subagentsSnapshot({ state: "ready-empty", referencedRuns: 2 }),
+		respond: () => inspectOk(SUCCESS_INSPECT),
+	});
+	const status = environment.document.getElementById("subagents-status");
+	assert.match(status.textContent, /No active fleet entries or async runs/);
+	assert.match(status.textContent, /2 chat-attributed runs/);
+	assert.match(status.textContent, /chat row/);
+});
+
+test("loads the full child session for a blocking run instead of stopping at the transcript", async () => {
+	const { environment, sessionCalls } = await bootInspect({
+		respond: () => inspectOk({ kind: "transcript", runId: "real-async-id", lines: 80, text: "Run: real-async-id\nState: completed" }),
+	});
+	const card = runCard(environment);
+	card.querySelector(".subagent-inspect-toggle").click();
+	await flushTasks();
+	await flushTasks();
+	assert.equal(sessionCalls.length, 1, "the child session is read once, right after the transcript reply");
+	assert.deepEqual(JSON.parse(sessionCalls[0].options.body), { generation: INSPECT_GENERATION, id: "real-async-id", index: 0 });
+
+	const panel = card.querySelector(".subagent-inspect-panel");
+	assert.match(panel.textContent, /State: completed/, "the extension transcript stays as the summary");
+	const records = panel.querySelectorAll(".chat-message");
+	assert.equal(records.length, 2, "the child session records are rendered with the chat rows");
+	assert.equal(records[0].dataset.role, "user");
+	assert.equal(records[0].querySelector(".chat-text").textContent, "Task: 只回复 OK");
+	const thinking = records[1].querySelector(".chat-thinking").querySelector(".chat-block-content");
+	assert.equal(thinking.textContent, "The task is trivial.", "thinking content is part of the answer");
+	const toolCall = records[1].querySelector(".chat-tool-call").querySelector(".chat-block-content");
+	assert.match(toolCall.textContent, /src\/browser\/app\.css/);
+	assert.match(panel.textContent, /1 record in this window are session metadata or could not be read/);
+	assert.equal(panel.querySelectorAll(".subagent-inspect-toggle").length, 0, "no nested inspector is offered inside the child view");
+});
+
+test("pages backwards through a child session and reports a failed read as its own state", async () => {
+	let pages = 0;
+	const answers = [
+		{ ok: true, status: 200, json: async () => ({ ok: true, messages: [CHILD_RECORDS[1]], earlier: true, cursor: 5, window: { records: 6, skipped: 0, truncatedHead: true, limit: 40 } }) },
+		{ ok: true, status: 200, json: async () => ({ ok: true, messages: [CHILD_RECORDS[0]], earlier: false, cursor: null, window: { records: 6, skipped: 0, truncatedHead: true, limit: 40 } }) },
+	];
+	const { environment, sessionCalls } = await bootInspect({
+		respond: () => inspectOk({ kind: "transcript", runId: "real-async-id", lines: 80, text: "Run: real-async-id" }),
+		sessionRespond: () => { pages += 1; return answers[Math.min(pages, 2) - 1]; },
+	});
+	const card = runCard(environment);
+	card.querySelector(".subagent-inspect-toggle").click();
+	await flushTasks();
+	await flushTasks();
+	const panel = card.querySelector(".subagent-inspect-panel");
+	assert.match(panel.textContent, /file tail/, "a truncated window is disclosed");
+	assert.equal(panel.querySelectorAll(".chat-message").length, 1);
+
+	panel.querySelector(".subagent-inspect-more").click();
+	await flushTasks();
+	assert.deepEqual(JSON.parse(sessionCalls[1].options.body), { generation: INSPECT_GENERATION, id: "real-async-id", index: 0, before: 5 });
+	assert.equal(panel.querySelectorAll(".chat-message").length, 2, "the older page is prepended to the newer one");
+	assert.match(panel.querySelector(".chat-message").querySelector(".chat-text").textContent, /Task: 只回复 OK/);
+
+	const failed = await bootInspect({
+		respond: () => inspectOk({ kind: "transcript", runId: "real-async-id", lines: 80, text: "Run: real-async-id" }),
+		sessionRespond: () => ({ ok: false, status: 404, json: async () => ({ ok: false, error: { code: "not_found", message: "this run has no child session file on disk any more (child index 0)" } }) }),
+	});
+	const failedCard = runCard(failed.environment);
+	failedCard.querySelector(".subagent-inspect-toggle").click();
+	await flushTasks();
+	await flushTasks();
+	const failedPanel = failedCard.querySelector(".subagent-inspect-panel");
+	assert.match(failedPanel.textContent, /Child session/);
+	assert.match(failedPanel.textContent, /Unavailable · Not found \(not_found\)/, "a failed read is reported instead of an empty list");
+	assert.match(failedPanel.textContent, /no child session file on disk/, "the host reason reaches the reader");
+	assert.equal(failedPanel.querySelectorAll(".chat-message").length, 0);
 });

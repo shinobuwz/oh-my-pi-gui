@@ -452,6 +452,7 @@ test("keeps chat-attributed run ids inspectable without widening what the page m
 	assert.equal(bridge.retainReferencedAsyncIds(["../etc/passwd"]), 0, "a path-looking string is never retained");
 	assert.equal(bridge.retainReferencedAsyncIds(["has space"]), 0, "only opaque id shapes are retained");
 
+	assert.equal(bridge.snapshot().referencedRuns, 1, "the snapshot counts the ids the chat named, without exposing them");
 	const fromChat = await bridge.inspect(21, { generation: 21, id: "chat-run-id" });
 	assert.equal(fromChat.ok, true, "a chat-attributed id is inspectable");
 	assert.equal(fromChat.inspect.asyncId, "async-real-id");
@@ -468,6 +469,80 @@ test("keeps chat-attributed run ids inspectable without widening what the page m
 	assert.equal(evicted.status, 404, "the referenced-id window is bounded");
 	const newest = await bridge.inspect(21, { generation: 21, id: "chat-run-79" });
 	assert.equal(newest.ok, true);
+});
+
+test("falls back to the run's transcript when the inspect command refuses a blocking (foreground) run", async () => {
+	const events = new FakeEvents();
+	const { runner, calls } = createRunner((_text, requestId) => ({
+		ok: true,
+		// Exactly what pi-subagents answers for a foreground run: the inspect command serves
+		// async runs only, so its refusal is the signal that this is not one.
+		line: inspectPayload(requestId, { error: { code: "not_found", message: "Async run 'chat-foreground-id' was not found." } }),
+	}));
+	const bridge = await bindInspectable(events, { runner });
+	assert.equal(await bridge.retainReferencedAsyncIds(["chat-foreground-id"]), 1);
+
+	const pending = bridge.inspect(21, { generation: 21, id: "chat-foreground-id", lines: 12 });
+	await waitForHint();
+	const request = events.requests.at(-1);
+	assert.equal(request.method, "status", "the refusal must be followed by the extension's own status action");
+	assert.deepEqual(request.params, { id: "chat-foreground-id", view: "transcript", lines: 12 });
+	events.reply(request, {
+		success: true,
+		data: {
+			text: [
+				"Run: chat-foreground-id",
+				"State: live foreground",
+				"Tool: read (ok)",
+				"Transcript: C:\\private\\run\\child_session.jsonl",
+				"Bearer abc.def-token",
+				"/srv/private/run",
+			].join("\n"),
+		},
+	});
+
+	const result = await pending;
+	assert.equal(result.ok, true, "a refused foreground run must still answer with its transcript");
+	assert.equal(result.inspect.kind, "transcript");
+	assert.equal(result.inspect.runId, "chat-foreground-id");
+	assert.equal(result.inspect.lines, 12);
+	assert.match(result.inspect.text, /State: live foreground/);
+	assert.equal(result.inspect.text.includes("abc.def-token"), false, "the fallback keeps the same secret redaction");
+	assert.equal(result.inspect.text.includes("child_session.jsonl"), false, "a transcript path line names a host location and is dropped");
+	assert.match(result.inspect.text, /\/srv\/private\/run/, "ordinary path text inside the transcript stays readable");
+	assert.equal(calls.length, 1, "the structured command is tried exactly once before the fallback");
+	bridge.dispose();
+});
+
+test("reports the extension's own code when the transcript fallback cannot answer either", async () => {
+	const events = new FakeEvents();
+	const { runner } = createRunner((_text, requestId) => ({
+		ok: true,
+		line: inspectPayload(requestId, { error: { code: "not_found", message: "Async run 'chat-foreground-id' was not found." } }),
+	}));
+	const bridge = await bindInspectable(events, { runner });
+	await bridge.retainReferencedAsyncIds(["chat-foreground-id"]);
+
+	const refused = bridge.inspect(21, { generation: 21, id: "chat-foreground-id" });
+	await waitForHint();
+	events.reply(events.requests.at(-1), {
+		success: false,
+		error: { code: "foreign_session", message: "Inspection is only available for runs owned by the current session." },
+	});
+	const foreign = await refused;
+	assert.equal(foreign.ok, false);
+	assert.equal(foreign.code, "foreign_session", "a specific fallback code says more than the generic refusal");
+	assert.match(foreign.message, /owned by the current session/);
+
+	// A fallback that also has nothing to say keeps the inspect command's own refusal.
+	const bothMissing = bridge.inspect(21, { generation: 21, id: "chat-foreground-id" });
+	await waitForHint();
+	events.reply(events.requests.at(-1), { success: true, data: { text: "   " } });
+	const missing = await bothMissing;
+	assert.equal(missing.status, 404);
+	assert.equal(missing.code, "not_found");
+	assert.equal(missing.message, "Async run 'chat-foreground-id' was not found.");
+	bridge.dispose();
 });
 
 test("refuses unknown ids, fleet keys, unknown child nodes and unusable bodies before the session", async () => {
@@ -512,8 +587,9 @@ test("refuses unknown ids, fleet keys, unknown child nodes and unusable bodies b
 });
 
 test("maps extension error codes and normalizes internal/unknown codes to inspect_failed", async () => {
+	// `not_found` is deliberately absent here: for a referenced id it now triggers the
+	// foreground transcript fallback, and that path is asserted on its own above.
 	for (const [code, status] of [
-		["not_found", 404],
 		["foreign_session", 403],
 		["stale", 409],
 		["no_active_session", 503],

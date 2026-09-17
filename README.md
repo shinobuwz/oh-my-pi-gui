@@ -176,8 +176,9 @@ and redaction rules are not duplicated.
 
 ### Subagents in the SDK host
 
-The page panel is unchanged (`src/browser/app.js` keeps rendering the same
-`available/state/generation/fleet/asyncSnapshot/error/revision` contract). The host attaches a
+The page panel keeps the existing status fields and adds a bounded `referencedRuns` count
+(`src/browser/app.js` renders the `available/state/generation/fleet/asyncSnapshot/referencedRuns/error/revision`
+contract). The host attaches a
 read-only adapter (`src/host/subagents.js`) as the last step of `startHost`, after extensions
 bind, and leaves the initial ping → status bind unawaited so a missing or slow owner never
 delays startup.
@@ -209,8 +210,9 @@ delays startup.
   target a transcript. Fleet entries, runs, children and result summaries are bounded
   (32/32/8/8), text fields are clipped, timestamps use the public `updatedAt` (the legacy
   `lastUpdate` is never forwarded) and secret shapes (`Bearer …`, `key=`/`token=`/`secret=`/
-  `password=`) are redacted while ordinary transcript paths stay readable. Raw task fields,
-  artifact paths and artifact access are never exposed.
+  `password=`) are redacted while ordinary transcript paths stay readable. Raw host filesystem
+  paths, artifact paths and artifact access are never exposed to the page; the separate child
+  session route below reads only the derived conversation projection.
 - **Structured inspection (host inspect channel).** The host can ask the extension for the
   *structured* view of one async run — the child's own Pi session messages (`text`/`toolCall`/
   `toolResult` with tool names and failure flags), the delegated task and the final output —
@@ -220,11 +222,21 @@ delays startup.
   session history write), and captures the `PI_SUBAGENT_INSPECT_JSON:` widget payload from the
   dedicated `subagent-inspect` key, correlating it by the host-generated `requestId`. This is
   the reason for `mode: "rpc"`: the command's handler refuses to emit on `tui` surfaces.
+- **Blocking (foreground) delegations answer with a transcript.** The inspect command serves
+  *async* runs only and refuses a blocking delegation by design. For such an id the host asks
+  the extension's `status` action once more — `{ id, view: "transcript", lines }`, the same
+  request the rail already uses for **View transcript** — and projects the reply as
+  `{ kind: "transcript", runId, lines, text }`: the running child's event tail while it runs,
+  or its remembered state/child/result tail after the fact. Nothing is guessed: the fallback
+  fires only on the command's own `not_found`, never for a `childId` (the transcript action has
+  no child selector), and if it cannot answer either, a specific extension code (`foreign_session`,
+  `stale`, …) replaces the refusal while a second `not_found` does not.
 - **Inspection identity, bounds and failures.** Only an async id the host reported can be
   inspected: one retained by the current generation's successful status response, or one
   attributed by a `subagent` tool result in the chat transcript (a fleet display key never
-  can). Such a chat row gets its own collapsed structured view, so a finished run stays
-  inspectable after it leaves the bounded snapshot. A `childId` must
+  can) — that second class is exactly where a blocking delegation's `details.runId` arrives,
+  and it is what the transcript fallback above exists for. Such a chat row gets its own
+  collapsed inspector, so a chat-attributed run stays readable after it leaves the bounded snapshot. A `childId` must
   be a node id the current snapshot lists (a child without an id is refused, never guessed),
   and only one inspection per generation may be in flight. The command is bounded by a 5 s
   deadline (single attempt, no retry storm), the run id is validated before anything is sent,
@@ -245,11 +257,23 @@ delays startup.
   projected, credential-shaped text and sensitive path fields go through the shared redaction,
   and the extension's bounded error message is preserved verbatim.
 - **Known limits of the structured view.** Thinking text and full tool arguments/results are
-  not part of the payload (the extension sends previews, bounded per message), the payload is
-  capped at 200 messages / 1000 characters / 64 KB by the extension, and a run whose child
-  session file is unreadable (or whose artifacts are gone) answers with the extension's own
-  bounded error; the page then shows that error and the run-level **View transcript** text tail
-  remains available as the fallback — no messages are invented.
+  not part of the structured payload (the extension sends previews, bounded per message), and
+  the payload is capped at 200 messages / 1000 characters / 64 KB by the extension. If the
+  structured command cannot read the async artifacts, the page keeps the explicit extension
+  error and the run-level **View transcript** text tail; no messages are invented.
+- **Host-side child-session page for foreground runs.** When the inspect reply is the honest
+  `{ kind: "transcript" }` foreground shape, the page immediately asks
+  `POST /api/subagents/session` for `{ generation, id, index: 0 }`. The host derives
+  `<parent session dir>/<parent session id>/<runId>/run-0/session.jsonl` from the session's own
+  parent `.jsonl` file, checks the same run-id allow-list, rejects symlinked/non-regular paths,
+  reads at most an 8 MiB tail and projects at most 2000 records; the page shows 40 at a time and
+  can walk backwards with the returned bounded cursor. Thinking blocks, full tool arguments and
+  tool results are then visible through the same text-only chat renderer, still with credential
+  redaction and no raw metadata/path fields. The browser currently requests child index 0 only;
+  a parallel/chain child at another index is reported as unavailable rather than guessed, and
+  explicit alternate `sessionDir` roots are intentionally not searched. A blocking run's id
+  arrives only with its tool result, so it cannot be named while still running; after a Pi
+  restart pi-subagents may forget the run (`not_found`) even if its child file remains on disk.
 - **Honest unavailability.** `ready-empty` (no work), `error` (owner refused),
   `timeout`/`unavailable` (no RPC owner — the case where pi-subagents is not installed) and
   unattached (the host shape has no extension-bus exports) stay visibly distinct; the panel
@@ -414,11 +438,12 @@ Test inventory and the real-vs-stub boundary:
 | `test/chat-server.test.js` | authenticated generation-bound chat state/message/Stop routes and cross-site/stale rejection | real HTTP against the real server with a session-control fixture |
 | `test/model-server.test.js` | authenticated model/thinking routes, exact candidate-key forwarding, generation and Origin rejection | real HTTP against the real server |
 | `test/model-page.test.js` | candidate selectors, explicit submissions, effective-state and rejection feedback | strict fake DOM |
-| `test/subagents-server.test.js` | authenticated read-only details/refresh routes plus `POST /api/subagents/inspect` (exact body allow-list, id/childId/lines validation, generation and Origin rejection, extension error-code status mapping, unattached 503, and no host path in the response) | real HTTP against the real server with a session-control fixture |
-| `test/subagents-page.test.js` | bounded fleet/async rendering, manual transcript detail, text-only output and visibly distinct timeout/omitted states | strict fake DOM |
+| `test/subagents-server.test.js` | authenticated read-only details/refresh routes plus `POST /api/subagents/inspect` and `POST /api/subagents/session` (exact body allow-lists, generation/Origin/method rejection, id/childId/lines/index/cursor validation, extension error-code status mapping, unattached 503, and no host path in the responses) | real HTTP against the real server with a session-control fixture |
+| `test/subagents-page.test.js` | bounded fleet/async rendering, manual transcript detail, text-only output and visibly distinct timeout/omitted states, the foreground transcript panel, and fleet entries that render only the fields the DTO carries | strict fake DOM |
 | `test/git-status.test.js` | the shared Git/usage implementation (`src/core/git-status.js`): active-branch usage aggregation, context null/known values, bounded cwd, injected Git normal/unborn/detached/non-repository handling, event refresh and generation disposal | public-API-shaped unit fixtures |
-| `test/subagents-rpc.test.js` | the shared read-only pi-subagents RPC consumer (`src/core/subagents-rpc.js`): correlated public ping/status RPC, generation-scoped fleet/async projection, identity separation, fixed transcript params, timeout/error distinction and redaction; plus the structured inspection path (retained-id/child-node allowlist, exact extension command text, single in-flight slot, bounded timeout, mapping of every extension error code and of `internal`/unknown codes, refusal of malformed or uncorrelated payloads and of an unavailable command channel) | public event-bus fixture with an injected inspect transport |
+| `test/subagents-rpc.test.js` | the shared read-only pi-subagents RPC consumer (`src/core/subagents-rpc.js`): correlated public ping/status RPC, generation-scoped fleet/async projection, identity separation, fixed transcript params, timeout/error distinction and redaction; plus the inspection path (retained-id/child-node allowlist, exact extension command text, single in-flight slot, bounded timeout, mapping of every extension error code and of `internal`/unknown codes, refusal of malformed or uncorrelated payloads and of an unavailable command channel, and the foreground transcript fallback with its own failure precedence) | public event-bus fixture with an injected inspect transport |
 | `test/inspect-reply.test.js` | the pure structured-reply parser and projection (`src/core/inspect-reply.js`): envelope validation (kind/version/requestId), rejection reasons for foreign, malformed and mismatched payloads, message/task/finalOutput re-bounding, `truncated` normalization, dropped-entry counting, credential and sensitive-path-field redaction, and the bounded payload/line helpers | pure unit tests, no session |
+| `test/subagent-session.test.js` | the host-side child-session path derivation, parent-session layout, bounded tail/paging, thinking/tool-call/tool-result projection, credential redaction, partial-record dropping, and fail-closed missing/directory/symlink cases | temporary files only; no session or model |
 | `test/host-sdk-loader.test.js` | SDK discovery (env overrides, global npm roots, `npm root -g`, fail-closed explicit overrides) and export-shape validation, plus the repository portability guards (no hardcoded personal installation paths, no import of the bundled CLI entry) | temporary fixture roots, injected `npm root -g`; no installed package, no network |
 | `test/host-session.test.js` | `startHost` against a fake SDK: session creation, chat/model/status attach/detach, fail-closed startup, resource release on close and the synchronous exit path | fake `AgentSession` |
 | `test/host-ui-context.test.js` | the browser-driven `ctx.ui`: dialog kinds, Pi-compatible return types, non-approval exits, explicit `custom` failure with an unanswerable notice, notify/setStatus recording, the safe no-op downgrades, and the bounded widget-capture seam (payload survives the emit-then-retract, generic pane limits unchanged, listener isolation/bounds) | `RequestStore` + fake dialog consumers |
@@ -427,7 +452,7 @@ Test inventory and the real-vs-stub boundary:
 | `test/host-model.test.js` | SDK model/thinking adapter on a fake session: scoped/available candidate allowlist and deduplication, sanitized snapshots (no credentials/baseUrl/headers), unknown-key refusal before `setModel()`, effective model/level read-back, missing-auth throw and `false` return keeping the previous model, thinking clamp echo, session-only calls (no `persist`) and disposal | public-API-shaped `AgentSession` fixture; no model call |
 | `test/host-status.test.js` | SDK status adapter on a fake session: cwd reader plus explicit fallback, active-branch usage aggregation with an unknown total when a component is missing, context usage/window, bounded Git argv (`shell: false`, timeout, maxBuffer) with reason-code-only failures, event refresh, disposal and late-callback rejection | public-API-shaped `AgentSession` fixture with an injected `execFile`; no real repository or subprocess |
 | `test/host-subagents.test.js` | the host-owned extension-bus channel (same bus, default discovery, explicit reasons instead of a private seam), the read-only adapter over a fake pi-subagents owner (bounded fleet/async lists with public time fields, fleet-key-vs-run-id separation, allowlist-only detail with the fixed transcript params, empty/error/timeout distinction, redaction with ordinary paths preserved, body validation, hint-burst coalescing, no writes after dispose), the inspect transport over the real UI-context capture seam (command-catalog check before any prompt, emit-then-retract capture, request-id correlation, timeout/subscription release, missing/`false`/throwing command answers) and the lifecycle attach/detach plus `not_attached` contract | fake extension bus + fake RPC owner + real UI context; no model call, no real subagent, no installed package |
-| `test/host-subagents-server.test.js` | real HTTP `/api/state` `subagents` section plus `POST /api/subagents/details`, `POST /api/subagents/refresh` and `POST /api/subagents/inspect` through the host: bounded projection, exact transcript params, redaction, refresh round trip, hint coalescing, unavailable owner, unattached host shape with a logged reason, resource-load failure refusing startup, the existing token/Host/Origin/extra-field/stale/method rejections, no-write-after-shutdown, and the structured inspection round trip (command prompt through the session, no chat history or model call, timeout while streaming leaves the turn untouched, and honest error mapping for unavailable commands, missing payloads and extension error replies) | real loopback HTTP server, fake SDK bus, fake RPC owner and a session double that speaks the real inspect protocol through the host's own UI context; no model call, no real subagent |
+| `test/host-subagents-server.test.js` | real HTTP `/api/state` `subagents` section plus `POST /api/subagents/details`, `/api/subagents/refresh`, `/api/subagents/inspect` and `/api/subagents/session` through the host: bounded projection, exact transcript params, derived child-session read with thinking/tool-call content, redaction and no path leakage, refresh round trip, hint coalescing, unavailable owner, unattached host shape with a logged reason, resource-load failure refusing startup, the existing token/Host/Origin/extra-field/stale/method rejections, no-write-after-shutdown, and the structured inspection round trip (command prompt through the session, no chat history or model call, timeout while streaming leaves the turn untouched, and honest error mapping for unavailable commands, missing payloads and extension error replies) | real loopback HTTP server, fake SDK bus, fake RPC owner and a session double that speaks the real inspect protocol through the host's own UI context; no model call, no real subagent |
 | `test/host-controls-server.test.js` | real HTTP `/api/model`, `/api/thinking` and `/api/state` round trips through the host bridge with a fake session and an injected Git double: candidate-key forwarding, effective model/level echo, clamp echo, activation failure keeping the previous model, plus the existing token/Origin/body/generation/method rejections and the serialized-payload leakage check | real loopback HTTP server, fake `AgentSession` |
 | `test/host-server.test.js` | real HTTP `/api/state` + `/api/answer` dialogs, unauthenticated/cross-site/malformed answer rejection, the explicit `reload_unavailable` refusal, the served-page dialog/chat snapshot render, and listener release with non-approval dialogs on close | real loopback HTTP server, fake SDK and Git double |
 | `test/host-main.test.js` | launcher argument parsing, `--help`, exit codes, fail-closed startup reporting, signal-driven shutdown, synchronous `exit` cleanup and the direct `node src/host/main.js` entry | injected host starter plus a real subprocess for `--help` / missing-SDK fail-closed |
@@ -458,21 +483,28 @@ repository):
 4. Confirm the Subagents panel distinguishes RPC unavailable, timeout, failed-reply and
    empty/omitted states. With a live pi-subagents owner, press **Refresh** and verify fleet
    display keys and async run ids remain separate; press **View transcript** for a listed
-   async id and confirm only a bounded transcript tail appears. There must be no spawn/stop/
-   steer, scheduler/configuration, filesystem or artifact controls/paths.
-5. Ask the agent (or an extension command such as `/timed`) to raise a standard dialog;
+   async id and confirm only a bounded transcript tail appears. Entries must show only the
+   fields the DTO carries (an absent `role`/`state` is omitted, never rendered as `Unknown`).
+   There must be no spawn/stop/steer, scheduler/configuration, filesystem or artifact
+   controls/paths.
+5. Run a blocking delegation (ask the agent for one foreground `subagent` call) and press
+   **Inspect** on that chat row: the panel must answer with a transcript (`State:`/`Child:`/
+   `Result transcript tail:`), then load the derived child session when it exists. Thinking,
+   tool arguments and results should be visible as read-only disclosures; missing alternate
+   child indexes or session files must be reported, not guessed, and no host path line may appear.
+6. Ask the agent (or an extension command such as `/timed`) to raise a standard dialog;
    confirm it appears **only** in the browser (none in the terminal) and that the original
    flow continues with your answer. Confirm a host status integration still sees the waiting
    span (`ui_prompt_start` / `ui_prompt_end`).
-6. Trigger a `ctx.ui.custom` interaction (for example the `questionnaire` tool); confirm the
+7. Trigger a `ctx.ui.custom` interaction (for example the `questionnaire` tool); confirm the
    browser reports it as unsupported, the terminal shows no component, the tool fails
    explicitly and the standard confirm path still works afterwards.
-7. Reload the browser page while a prompt or chat stream is pending; confirm the current
+8. Reload the browser page while a prompt or chat stream is pending; confirm the current
    active-branch chat history and the same prompt reappear without duplicate rows.
-8. Press **Reload Pi session** in the page; confirm it is refused with `reload_unavailable`
+9. Press **Reload Pi session** in the page; confirm it is refused with `reload_unavailable`
    and the page keeps working; then restart the host process and confirm the old URL/token is
    no longer accepted.
-9. Stop the host with Ctrl+C (SIGINT); confirm pending prompts end as non-approval, the port
+10. Stop the host with Ctrl+C (SIGINT); confirm pending prompts end as non-approval, the port
    closes, and the `.browser-ui/url` file is removed.
 
 A CDP-driven acceptance run (headless Chrome against a real session and a real model) covered

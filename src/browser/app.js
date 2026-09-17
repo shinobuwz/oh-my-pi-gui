@@ -1156,7 +1156,7 @@ function subagentsStatusText(snapshot) {
 			return [
 				"Ready · empty",
 				"ready",
-				`No active fleet entries or async runs. ${referenced} finished run${referenced === 1 ? "" : "s"} stay${referenced === 1 ? "s" : ""} inspectable from ${referenced === 1 ? "its" : "their"} chat row.`,
+				`No active fleet entries or async runs. ${referenced} chat-attributed run${referenced === 1 ? "" : "s"} remain${referenced === 1 ? "s" : ""} inspectable from ${referenced === 1 ? "its" : "their"} chat row.`,
 			];
 		}
 		return ["Ready · empty", "ready", "No fleet entries or async runs are active."];

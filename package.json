@@ -12,7 +12,7 @@
 		"start": "node src/host/main.js",
 		"test": "node --test --test-timeout=60000 \"test/**/*.test.js\"",
 		"test:host": "node --test --test-timeout=60000 \"test/host-*.test.js\"",
-		"check": "node --check src/core/request-store.js && node --check src/core/bridge-server.js && node --check src/core/chat-messages.js && node --check src/core/model-catalog.js && node --check src/core/git-status.js && node --check src/core/subagents-rpc.js && node --check src/browser/app.js && node --check src/host/sdk-loader.js && node --check src/host/ui-context.js && node --check src/host/chat.js && node --check src/host/models.js && node --check src/host/status.js && node --check src/host/subagents.js && node --check src/host/host.js && node --check src/host/ensure-ui-build.js && node --check src/host/main.js"
+		"check": "node --check src/core/request-store.js && node --check src/core/bridge-server.js && node --check src/core/chat-messages.js && node --check src/core/model-catalog.js && node --check src/core/git-status.js && node --check src/core/subagents-rpc.js && node --check src/core/subagent-session.js && node --check src/browser/app.js && node --check src/host/sdk-loader.js && node --check src/host/ui-context.js && node --check src/host/chat.js && node --check src/host/models.js && node --check src/host/status.js && node --check src/host/subagents.js && node --check src/host/host.js && node --check src/host/ensure-ui-build.js && node --check src/host/main.js"
 	},
 	"dependencies": {
 		"@deepseek-ai/dsh-client-ui-primitives": "0.1.5-rc.2",

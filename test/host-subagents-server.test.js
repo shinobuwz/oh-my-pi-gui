@@ -13,7 +13,7 @@
 
 import assert from "node:assert/strict";
 import { request as httpRequest } from "node:http";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -47,9 +47,10 @@ const HINT_CHANNELS = [SUBAGENT_ASYNC_COMPLETE_EVENT, SUBAGENT_ASYNC_STARTED_EVE
  * `startHost` and receives the fixture, so a fake RPC owner can be registered while the host
  * boots — exactly the timing of the real extension, which registers during resource load.
  */
-async function withHost(run, { extensionBus = true, timeoutMs, eventDebounceMs, inspectTimeoutMs, logger = () => {}, setup = null } = {}) {
+async function withHost(run, { extensionBus = true, timeoutMs, eventDebounceMs, inspectTimeoutMs, sessionFile = null, logger = () => {}, setup = null } = {}) {
 	const tmp = mkdtempSync(join(tmpdir(), "pi-gui-subagents-"));
-	const { sdk, bus, calls, session, listeners } = createFakeSdk({ extensionBus });
+	const resolvedSessionFile = typeof sessionFile === "function" ? sessionFile(tmp) : sessionFile;
+	const { sdk, bus, calls, session, listeners } = createFakeSdk({ extensionBus, sessionFile: resolvedSessionFile });
 	const extra = typeof setup === "function" ? await setup({ sdk, bus, calls, tmp, session, listeners }) : {};
 
 	const host = await startHost({
@@ -115,6 +116,40 @@ function post(host, path, body, extraHeaders = {}) {
 }
 
 describe("SDK host subagents over HTTP", () => {
+	it("serves an allowlisted child session page from the real host route", async () => {
+		const childRunId = "b8b66f6a-5c54-41c5-8efc-44fbf9655b3e";
+		await withHost(async ({ host, bus }) => {
+			await host.subagents.bind();
+			assert.equal(await host.subagents.retainReferencedAsyncIds([childRunId]), 1);
+
+			const page = await post(host, "/api/subagents/session", { generation: 1, id: childRunId });
+			assert.equal(page.status, 200);
+			assert.equal(page.payload.ok, true);
+			assert.equal(page.payload.id, childRunId);
+			assert.equal(page.payload.index, 0);
+			assert.equal(page.payload.messages.length, 2);
+			assert.equal(page.payload.messages[0].role, "user");
+			assert.equal(page.payload.messages[0].text, "Task: 只回复 OK");
+			assert.equal(page.payload.messages[1].blocks[0].type, "thinking");
+			assert.equal(page.payload.messages[1].blocks[1].type, "toolCall");
+			assert.match(page.payload.messages[1].blocks[1].arguments, /src\/browser\/app\.css/);
+			assert.equal(JSON.stringify(page.payload).includes("session.jsonl"), false, "the derived host path never crosses the route");
+			assert.equal(JSON.stringify(page.payload).includes("async-subagent-runs"), false, "no host path may appear in the child projection");
+		}, {
+			sessionFile: (tmp) => join(tmp, "parent-session.jsonl"),
+			setup: ({ bus, tmp }) => {
+				writeFileSync(join(tmp, "parent-session.jsonl"), "");
+				const childPath = join(tmp, "parent-session", childRunId, "run-0", "session.jsonl");
+				mkdirSync(join(childPath, ".."), { recursive: true });
+				writeFileSync(childPath, [
+					JSON.stringify({ type: "message", id: "child-1", message: { role: "user", content: [{ type: "text", text: "Task: 只回复 OK" }], timestamp: 1 } }),
+					JSON.stringify({ type: "message", id: "child-2", message: { role: "assistant", content: [{ type: "thinking", thinking: "Read-only." }, { type: "toolCall", id: "call-1", name: "read", arguments: { path: "src/browser/app.css" } }], timestamp: 2 } }),
+				].join("\n"));
+				return { owner: createFakeSubagentsOwner(bus) };
+			},
+		});
+	});
+
 	it("serves the bounded read-only slice and round-trips both fixed routes", async () => {
 		const transcripts = [];
 		await withHost(async ({ host, calls, owner, bus }) => {

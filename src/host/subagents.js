@@ -70,6 +70,7 @@ import {
 	parseInspectWidgetLine,
 } from "../core/inspect-reply.js";
 import { SUBAGENT_INSPECT_BODY_KEYS, SubagentsBridge } from "../core/subagents-rpc.js";
+import { SUBAGENT_SESSION_LIMITS, childSessionPath, readChildSessionPage } from "../core/subagent-session.js";
 
 /**
  * Default coalescing window for the public async-run lifecycle hints. A burst (for example
@@ -83,6 +84,7 @@ export const MAX_OBSERVED_INSPECT_PAYLOADS = 8;
 const REFRESH_BODY_KEYS = new Set(["generation"]);
 const DETAIL_BODY_KEYS = new Set(["generation", "id"]);
 const INSPECT_BODY_KEYS = new Set(SUBAGENT_INSPECT_BODY_KEYS);
+const SESSION_BODY_KEYS = new Set(["generation", "id", "index", "before"]);
 
 function errorMessage(error) {
 	return error instanceof Error ? error.message : String(error);
@@ -381,6 +383,7 @@ export function openSubagentsChannel({ sdk, cwd, logger = () => {}, extraExtensi
 export class HostSubagentsBridge {
 	#bridge;
 	#logger;
+	#getSessionFile = () => null;
 	#active = true;
 
 	constructor({
@@ -396,6 +399,7 @@ export class HostSubagentsBridge {
 		uiContext = null,
 		inspectRunner = null,
 		inspectTimeoutMs = undefined,
+		getSessionFile = null,
 	} = {}) {
 		if (!eventBus || typeof eventBus.on !== "function" || typeof eventBus.emit !== "function") {
 			throw new Error("HostSubagentsBridge requires the shared extension event bus");
@@ -428,6 +432,9 @@ export class HostSubagentsBridge {
 			options.inspectRunner = createSessionInspectRunner({ session, uiContext, logger, ...(typeof setTimer === "function" ? { setTimeout: setTimer } : {}), ...(typeof clearTimer === "function" ? { clearTimeout: clearTimer } : {}) });
 		}
 		this.#bridge = new SubagentsBridge(options);
+		// The child session reader needs the *parent* session file to derive a child path from
+		// it. It is a getter because the host learns the file only once the session exists.
+		this.#getSessionFile = typeof getSessionFile === "function" ? getSessionFile : () => null;
 	}
 
 	/** Deadline this adapter gives one structured inspection round trip. */
@@ -453,7 +460,6 @@ export class HostSubagentsBridge {
 		return this.#bridge.snapshot();
 	}
 
-	/** Read one allowlisted async run transcript; never accepts a fleet key or another body field. */
 	/** Register async run ids the chat projection attributed to a subagent tool result. */
 	retainReferencedAsyncIds(ids) {
 		return this.#bridge.retainReferencedAsyncIds(ids);
@@ -467,6 +473,69 @@ export class HostSubagentsBridge {
 			return Promise.resolve(failure(400, "invalid_body", "subagent details only accept the current generation and async run id"));
 		}
 		return this.#bridge.detail(expectedGeneration, body);
+	}
+
+	/**
+	 * Read one page of a run's *child session* straight from disk — the full conversation the
+	 * extension only previews (every tool call with its arguments, every result, thinking
+	 * included).
+	 *
+	 * This is the one host capability that reads a file pi-subagents wrote, so it is fenced
+	 * twice: the run id must pass the same allow-list `details()`/`inspect()` use, and the path
+	 * is derived by `childSessionPath()` from the parent session file — the browser never sends
+	 * a path, only a run id and a child index. Paging walks backwards with the cursor a previous
+	 * page returned.
+	 */
+	session(expectedGeneration, body = {}) {
+		if (!this.#active || expectedGeneration !== this.generation) {
+			return Promise.resolve(failure(409, "stale_generation", "the browser session generation is no longer current"));
+		}
+		if (!isRecord(body) || Object.keys(body).some((key) => !SESSION_BODY_KEYS.has(key))) {
+			return Promise.resolve(failure(400, "invalid_body", "a child session request only accepts the current generation, a run id, an optional child index and an optional cursor"));
+		}
+		if (body.generation !== expectedGeneration) {
+			return Promise.resolve(failure(409, "stale_generation", "the browser session generation is no longer current"));
+		}
+		const id = typeof body.id === "string" ? body.id : "";
+		if (!id || !this.#bridge.permitsRunId(id)) {
+			return Promise.resolve(failure(404, "not_found", "the requested run is not in the current subagent allowlist"));
+		}
+		if (body.before !== undefined && (!Number.isSafeInteger(body.before) || body.before <= 0 || body.before > SUBAGENT_SESSION_LIMITS.maxRecords)) {
+			return Promise.resolve(failure(400, "invalid_body", `a child session cursor must be a positive integer no greater than ${SUBAGENT_SESSION_LIMITS.maxRecords}`));
+		}
+		const index = body.index === undefined ? 0 : body.index;
+		if (!Number.isSafeInteger(index) || index < 0 || index > SUBAGENT_SESSION_LIMITS.maxChildIndex) {
+			return Promise.resolve(failure(400, "invalid_body", `a child index must be an integer between 0 and ${SUBAGENT_SESSION_LIMITS.maxChildIndex}`));
+		}
+		let parentSessionFile = null;
+		try {
+			parentSessionFile = this.#getSessionFile();
+		} catch {
+			// A session that is closing or has an incompatible manager must not turn into an
+			// uncaught route error or make the reader guess another root.
+			parentSessionFile = null;
+		}
+		const derived = childSessionPath({ parentSessionFile, runId: id, index });
+		if (!derived.ok) {
+			const status = derived.code === "no_session_file" ? 503 : 400;
+			return Promise.resolve(failure(status, derived.code, derived.message));
+		}
+		const page = readChildSessionPage({ path: derived.path, before: body.before ?? null });
+		if (!page.ok) {
+			const status = page.code === "not_found" ? 404 : 503;
+			const message = page.code === "not_found" ? `${page.message} (child index ${index})` : page.message;
+			return Promise.resolve(failure(status, page.code, message));
+		}
+		return Promise.resolve({
+			ok: true,
+			generation: this.generation,
+			id,
+			index,
+			messages: page.messages,
+			earlier: page.earlier,
+			cursor: page.cursor,
+			window: page.window,
+		});
 	}
 
 	/**

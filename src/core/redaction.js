@@ -17,7 +17,7 @@
 
 export const BEARER_SECRET = /\bBearer\s+[^\s"'`<>,;)}\]]+/gi;
 export const SECRET_ASSIGNMENT = /(\b(?:api[-_]?key|access[-_]?key|authorization|credential|private[-_]?key|refresh[-_]?token|key|token|secret|password)\b["']?\s*[:=]\s*)(?:(['"])[^'"\r\n]*\2|([^\s,;}\]\)]+))/gi;
-export const PATH_LINE = /^\s*(?:async(?:Dir| directory)?|session(?:File| path)?|output(?:File| path)?|cwd|working directory|artifact(?: path)?|events?|logs?|result(?: path)?|file|directory|path)\s*:/i;
+export const PATH_LINE = /^\s*(?:async(?:Dir| directory)?|session(?:File| path)?|transcript(?:Path| path)?|output(?:File| path)?|saved output(?: path)?|cwd|working directory|artifact(?: path)?|events?|logs?|result(?: path)?|file|directory|path)\s*:/i;
 export const SENSITIVE_PATH_FIELD = /("?(?:asyncDir|sessionFile|transcriptPath|artifactPath|outputFile|eventsPath|logPath|resultPath|cwd)"?\s*[:=]\s*)"?[^,}\r\n]+"?/gi;
 export const PATH_TOKEN = /(?:[A-Za-z]:[\\/][^\s"'`<>]+|\\\\[^\s"'`<>]+|(?:^|[\s([{"'])\/(?:Users|home|tmp|var|private|workspace|workspaces|agent|async-subagent-runs)[^\s"'`<>]*)/gi;
 

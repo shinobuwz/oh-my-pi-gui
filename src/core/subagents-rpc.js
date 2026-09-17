@@ -114,7 +114,9 @@ export const SUBAGENT_INSPECT_FAILURES = Object.freeze({
 	failed: [502, "inspect_failed"],
 });
 
-const FLEET_TOKEN_FIELDS = Object.freeze(["input", "output", "total"]);
+/* `window` is the child's current context size (input + cache read) and `windowPeak` its
+   peak, so the rail can show live context pressure instead of only cumulative tokens. */
+const FLEET_TOKEN_FIELDS = Object.freeze(["input", "output", "total", "window", "windowPeak"]);
 const OUTPUT_STATES = new Set(["present", "absent", "unknown"]);
 
 /** The shared redaction helper, bounded by this module's own code limit. */
@@ -161,6 +163,19 @@ function failure(kind, status, code, message) {
 		code: safeCode(code),
 		message: safeText(message, SUBAGENT_LIMITS.maxErrorChars) ?? "pi-subagents RPC failed",
 	};
+}
+
+/**
+ * Which failure to report when the structured inspect refused an id and the transcript
+ * fallback could not answer either. A specific extension code from the fallback (a foreign
+ * session, a run whose artifacts are gone, an index the extension needs) says more than the
+ * generic refusal, while a second `not_found` says nothing new and must not replace it.
+ */
+function preferInspectFailure(primary, fallback) {
+	if (fallback && fallback.ok === false && typeof fallback.code === "string" && fallback.code !== "not_found") {
+		return fallback;
+	}
+	return primary;
 }
 
 function errorForReply(reply) {
@@ -471,6 +486,10 @@ export class SubagentsBridge {
 			generation: this.#generation,
 			fleet: clone(this.#fleet),
 			asyncSnapshot: clone(this.#asyncSnapshot),
+			// Count only: the ids stay host-side. A chat-attributed delegation can leave the active
+			// fleet entirely, so this tells the rail that its "nothing is active" line does not mean
+			// "nothing is readable" — the run's own chat row is still addressable.
+			referencedRuns: this.#referencedAsyncIds.size,
 			error: this.#error ? { ...this.#error } : null,
 			revision: this.#revision,
 		};
@@ -582,6 +601,18 @@ export class SubagentsBridge {
 	}
 
 	/**
+	 * Whether one run id may be named by this generation at all: a run the current status
+	 * snapshot retains, or an id the chat attributed to a subagent tool result. Host-owned
+	 * readers that do not go through pi-subagents (the child session file) must ask this
+	 * before touching anything, so the browser cannot widen what it is allowed to read.
+	 */
+	permitsRunId(id) {
+		const candidate = safeText(id, SUBAGENT_LIMITS.maxKeyChars, { redactPaths: false });
+		if (!candidate || candidate !== id) return false;
+		return this.#asyncIds.has(candidate) || this.#referencedAsyncIds.has(candidate);
+	}
+
+	/**
 	 * Record async run ids the chat projection attributed to a `subagent` tool result, so a
 	 * chat row can be inspected even when the run already left the bounded status snapshot.
 	 * Bounded and FIFO; unknown, malformed and duplicate ids are ignored.
@@ -657,6 +688,11 @@ export class SubagentsBridge {
 	 * session. The deadline, the single in-flight slot and every failure code are explicit —
 	 * a timeout never retries and never touches an in-flight chat turn.
 	 *
+	 * The reply describes what the extension could actually serve: an async run comes back as
+	 * the structured view (`task`/`messages`/`finalOutput`), while a blocking (foreground)
+	 * delegation — which the extension refuses to inspect — comes back as
+	 * `{ kind: "transcript", runId, lines, text }` from its own status action.
+	 *
 	 * @param {number} expectedGeneration generation the browser believes is current
 	 * @param {{ generation?: number, id?: string, childId?: string, lines?: number }} [body]
 	 * @returns {Promise<{ ok: true, generation: number, inspect: object } | { ok: false, status: number, code: string, message: string }>}
@@ -716,13 +752,15 @@ export class SubagentsBridge {
 		return new Promise((resolve) => {
 			let settled = false;
 			let timer = null;
+			const clearDeadline = () => {
+				if (timer === null) return;
+				try { this.#clearTimeout(timer); } catch { /* best effort */ }
+				timer = null;
+			};
 			const finish = (value) => {
 				if (settled) return;
 				settled = true;
-				if (timer !== null) {
-					try { this.#clearTimeout(timer); } catch { /* best effort */ }
-					timer = null;
-				}
+				clearDeadline();
 				try { controller?.abort(); } catch { /* best effort */ }
 				if (this.#inspectAbort === controller) this.#inspectAbort = null;
 				this.#inspectInFlight = false;
@@ -754,9 +792,60 @@ export class SubagentsBridge {
 				return;
 			}
 			Promise.resolve(answer).then(
-				(value) => finish(this.#interpretInspectAnswer(value, requestId)),
-				(error) => finish(this.#inspectFailure("failed", `the pi-subagents inspect command failed: ${errorText(error)}`)),
+				(value) => {
+					// The command answered, so its own deadline no longer applies: the fallback below
+					// runs under the RPC deadline, and one inspection still has exactly one bound.
+					const result = this.#interpretInspectAnswer(value, requestId);
+					clearDeadline();
+					if (result.ok || result.code !== "not_found" || childId !== undefined) {
+						finish(result);
+						return;
+					}
+					// The inspect command serves async runs only and refuses a blocking (foreground)
+					// delegation with exactly this code, while pi-subagents still answers that run's
+					// transcript through its status action. The refusal gets one bounded second look.
+					this.#transcriptFallback(id, lines).then(
+						(fallback) => finish(fallback.ok === true ? fallback : preferInspectFailure(result, fallback)),
+						() => finish(result),
+					);
+				},
+				(error) => {
+					clearDeadline();
+					finish(this.#inspectFailure("failed", `the pi-subagents inspect command failed: ${errorText(error)}`));
+				},
 			);
+		});
+	}
+
+	/**
+	 * Read one run's transcript through the extension's `status` action — the shape
+	 * pi-subagents offers for blocking (foreground) delegations, which its structured inspect
+	 * command refuses by design. A live foreground run answers with its running child's event
+	 * tail, a remembered one with its child state, acceptance and result tail; both are text.
+	 *
+	 * The text passes through the same bound and redaction as `detail()`, so this fallback can
+	 * never widen what reaches the browser, and it accepts no id that the caller had not already
+	 * checked against this generation's allowlist.
+	 *
+	 * @param {string} id an id already accepted by this generation's allowlist
+	 * @param {number|undefined} lines the validated inspection line count
+	 */
+	#transcriptFallback(id, lines) {
+		const bound = lines ?? SUBAGENT_DETAIL_LINES;
+		return this.#requestRpc("status", { id, view: "transcript", lines: bound }).then((reply) => {
+			if (!reply.ok) return reply;
+			if (!isRecord(reply.data)) {
+				return failure("invalid_reply", 502, "invalid_reply", "pi-subagents returned no status data for this run");
+			}
+			const text = detailText(reply.data.text);
+			if (!text) {
+				return failure("not_found", 404, "not_found", "pi-subagents returned no transcript for this run");
+			}
+			return {
+				ok: true,
+				generation: this.#generation,
+				inspect: { kind: "transcript", runId: id, lines: bound, text },
+			};
 		});
 	}
 

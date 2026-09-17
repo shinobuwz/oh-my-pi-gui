@@ -17,6 +17,10 @@ import {
 	SUBAGENT_RPC_READY_EVENT,
 } from "../src/core/subagents-rpc.js";
 import { RequestStore } from "../src/core/request-store.js";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync as writeFileSyncNode } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+
 import { createHostLifecycle } from "../src/host/host.js";
 import {
 	HostSubagentsBridge,
@@ -40,6 +44,7 @@ function createHostBridge(bus, options = {}) {
 		...(options.session ? { session: options.session } : {}),
 		...(options.uiContext ? { uiContext: options.uiContext } : {}),
 		...(Number.isFinite(options.inspectTimeoutMs) ? { inspectTimeoutMs: options.inspectTimeoutMs } : {}),
+		...(typeof options.getSessionFile === "function" ? { getSessionFile: options.getSessionFile } : {}),
 	});
 	return { bridge, logs };
 }
@@ -329,11 +334,13 @@ describe("createHostLifecycle subagents section", () => {
 		const adapter = {
 			snapshot: () => ({ available: true, state: "ready-empty", revision: 1 }),
 			details: async (generation, body) => ({ ok: true, generation, id: body.id, text: "transcript" }),
+			session: async (generation, body) => ({ ok: true, generation, id: body.id, index: 0, messages: [{ id: "child-1", role: "user", text: "hi" }], earlier: false, cursor: null, window: { skipped: 0 } }),
 			refresh: async (generation) => ({ ok: true, generation, subagents: { available: true, state: "ready-empty", revision: 2 } }),
 		};
 		assert.equal(lifecycle.attachSubagents(adapter), adapter);
 		assert.deepEqual(lifecycle.sessionSnapshot(), { subagents: { available: true, state: "ready-empty", revision: 1 } });
 		assert.equal((await lifecycle.sessionSubagentsDetails(1, { generation: 1, id: "async-real-id" })).text, "transcript");
+		assert.equal((await lifecycle.sessionSubagentsSession(1, { generation: 1, id: "async-real-id" })).messages.length, 1);
 		assert.equal((await lifecycle.sessionSubagentsRefresh(1, { generation: 1 })).subagents.revision, 2);
 
 		assert.equal(lifecycle.detachSubagents(), adapter);
@@ -344,6 +351,12 @@ describe("createHostLifecycle subagents section", () => {
 	it("reports an unattached inspect route as not_attached instead of inventing data", async () => {
 		const lifecycle = createHostLifecycle();
 		assert.deepEqual(await lifecycle.sessionSubagentsInspect(1, { generation: 1, id: "async-real-id" }), {
+			ok: false,
+			status: 503,
+			code: "not_attached",
+			message: "the browser subagent status is not attached to a session",
+		});
+		assert.deepEqual(await lifecycle.sessionSubagentsSession(1, { generation: 1, id: "async-real-id" }), {
 			ok: false,
 			status: 503,
 			code: "not_attached",
@@ -563,5 +576,82 @@ describe("SDK host structured inspection", () => {
 		assert.equal(result.code, "inspect_failed");
 		owner.dispose();
 		bridge.dispose();
+	});
+});
+
+// --- child session reader (host-side disk read) ---------------------------------------
+
+const CHILD_RUN_ID = "b8b66f6a-5c54-41c5-8efc-44fbf9655b3e";
+
+/** Parent session file plus one real child session file, in a temporary directory. */
+function createChildSessionFixture() {
+	const root = mkdtempSync(join(tmpdir(), "pi-gui-host-child-"));
+	const parentSessionFile = join(root, "2026-09-17T03-23-37-884Z_01a0ad64.jsonl");
+	writeFileSyncNode(parentSessionFile, "");
+	const childPath = join(root, "2026-09-17T03-23-37-884Z_01a0ad64", CHILD_RUN_ID, "run-0", "session.jsonl");
+	mkdirSync(dirname(childPath), { recursive: true });
+	writeFileSyncNode(childPath, [
+		JSON.stringify({ type: "message", id: "child-1", message: { role: "user", content: [{ type: "text", text: "Task: 只回复 OK" }], timestamp: 1 } }),
+		JSON.stringify({ type: "message", id: "child-2", message: { role: "assistant", content: [{ type: "thinking", thinking: "Trivial." }, { type: "toolCall", id: "call-1", name: "read", arguments: { path: "src/browser/app.css" } }], timestamp: 2 } }),
+		JSON.stringify({ type: "message", id: "child-3", message: { role: "toolResult", toolCallId: "call-1", toolName: "read", content: [{ type: "text", text: "1  /* line */" }], timestamp: 3 } }),
+	].join("\n"));
+	return { root, parentSessionFile, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+}
+
+describe("SDK host child session reader", () => {
+	it("reads an allowlisted run's child session from disk and refuses everything else", async () => {
+		const bus = createFakeExtensionBus();
+		const fixture = createChildSessionFixture();
+		try {
+			const { bridge } = createHostBridge(bus, { getSessionFile: () => fixture.parentSessionFile });
+			await bridge.bind();
+			assert.equal(await bridge.retainReferencedAsyncIds([CHILD_RUN_ID]), 1);
+
+			const page = await bridge.session(7, { generation: 7, id: CHILD_RUN_ID });
+			assert.equal(page.ok, true);
+			assert.equal(page.index, 0);
+			assert.equal(page.messages.length, 3);
+			assert.equal(page.messages[0].text, "Task: 只回复 OK");
+			const blocks = page.messages[1].blocks;
+			assert.equal(blocks.length, 2, "thinking and the tool call are both projected");
+			assert.equal(blocks[0].type, "thinking");
+			assert.match(blocks[1].arguments, /src\/browser\/app\.css/);
+			assert.equal(page.messages[2].toolName, "read");
+			assert.equal(Object.hasOwn(page.messages[2], "subagentRunId"), false, "no grandchild id is projected");
+
+			// Identity: the allow-list decides, not the caller.
+			const unknown = await bridge.session(7, { generation: 7, id: "11111111-2222-4333-8444-555555555555" });
+			assert.equal(unknown.ok, false);
+			assert.equal(unknown.status, 404);
+			assert.equal(unknown.code, "not_found");
+			for (const body of [
+				{ generation: 7, id: CHILD_RUN_ID, before: 0 },
+				{ generation: 7, id: CHILD_RUN_ID, index: -1 },
+				{ generation: 7, id: CHILD_RUN_ID, lines: 10 },
+				{ generation: 6, id: CHILD_RUN_ID },
+			]) {
+				const refused = await bridge.session(7, body);
+				assert.equal(refused.ok, false, JSON.stringify(body));
+				assert.equal(refused.status === 409 ? "stale_generation" : "invalid_body", refused.code);
+			}
+
+			// A run whose child index has no file is a 404 with the index in the reason.
+			const missingIndex = await bridge.session(7, { generation: 7, id: CHILD_RUN_ID, index: 3 });
+			assert.equal(missingIndex.status, 404);
+			assert.match(missingIndex.message, /child index 3/);
+		} finally {
+			fixture.cleanup();
+		}
+	});
+
+	it("reports a host without a session file instead of guessing a path", async () => {
+		const bus = createFakeExtensionBus();
+		const { bridge } = createHostBridge(bus, { getSessionFile: () => null });
+		await bridge.bind();
+		await bridge.retainReferencedAsyncIds([CHILD_RUN_ID]);
+		const refused = await bridge.session(7, { generation: 7, id: CHILD_RUN_ID });
+		assert.equal(refused.ok, false);
+		assert.equal(refused.status, 503);
+		assert.equal(refused.code, "no_session_file");
 	});
 });
