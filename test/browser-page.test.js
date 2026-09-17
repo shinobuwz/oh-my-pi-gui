@@ -154,8 +154,8 @@ describe("browser page markup contract", () => {
 		assert.match(subagentsPanel, /class="[^"]*hidden/, "the subagents page starts hidden: Chat is the default");
 		assert.equal(/hidden/.test(chatPanel), false, "the chat page must not start hidden");
 
-		// The page owns the whole subagents area: heading, counts, state, refresh, status and
-		// both sections; and one bounded scroll body wraps the long content.
+		// The page owns the whole subagents area: heading, counts, state, refresh, a left list,
+		// and a separate transcript-first detail pane with a bounded body.
 		const pageBlock = indexHtml.slice(indexHtml.indexOf('id="subagents-page"'), indexHtml.indexOf("</main>", indexHtml.indexOf('id="subagents-page"')));
 		for (const token of [
 			'id="subagents-heading"',
@@ -163,18 +163,25 @@ describe("browser page markup contract", () => {
 			'id="subagents-state"',
 			'id="subagents-refresh"',
 			'id="subagents-status"',
+			'id="subagents-list"',
 			'id="subagents-fleet"',
 			'id="subagents-async"',
+			'id="subagents-detail"',
+			'id="subagents-detail-heading"',
+			'id="subagents-detail-state"',
+			'id="subagents-detail-empty"',
+			'id="subagents-detail-content"',
 			"class=\"column-title\">Fleet<",
 			"class=\"column-title\">Async runs<",
 		]) {
 			assert.equal(pageBlock.includes(token), true, `the subagents page must own ${token}`);
 		}
-		const bodyIndex = pageBlock.indexOf('class="subagents-page-body"');
-		assert.notEqual(bodyIndex, -1, "the page content needs one bounded scroll body");
-		for (const token of ['id="subagents-fleet"', 'id="subagents-async"']) {
-			assert.equal(pageBlock.indexOf(token) > bodyIndex, true, `${token} must sit inside the page body`);
-		}
+		assert.equal(pageBlock.includes('class="subagents-list-panel"'), true, "the page needs a standalone list pane");
+		assert.equal(pageBlock.includes('class="subagents-detail-page"'), true, "the page needs a standalone detail pane");
+		assert.equal(pageBlock.includes('class="subagents-list-scroll"'), true, "the subagent list needs its own scroll region");
+		assert.equal(pageBlock.includes('class="subagents-detail-scroll'), true, "the selected detail needs its own scroll region");
+		assert.equal(pageBlock.includes('role="listbox"'), true, "async runs need an accessible selection container");
+		assert.equal(pageBlock.includes('class="subagent-transcript"') === false, true, "transcript is rendered into the selected detail, not hardcoded as a second list");
 	});
 });
 

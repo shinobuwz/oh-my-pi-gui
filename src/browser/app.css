@@ -8,8 +8,8 @@
  * rounded composer, raised rail cards.
  *
  * Every structural hook owned by app.js (chat rows and blocks, prompt cards,
- * subagent entries, `data-*` state attributes) keeps its name; this file only
- * decides how those hooks look. app.js needs no change.
+ * subagent entries, `data-*` state attributes) keeps its name; this file supplies
+ * the visual layout for those hooks.
  */
 
 :root {
@@ -1564,25 +1564,20 @@ option {
 	color: var(--err);
 }
 
-/* The page body is the only scroller on this page: an opened inspector or a long child
-   transcript grows inside it instead of stretching the page or the columns beside it.
-   Fleet sits left, async runs (the long ones) get the wider right column. */
+/* Master-detail workspace: the list owns a narrow vertical scroll area, while the selected
+   run owns the remaining width for its transcript and inspector. Neither side can stretch the
+   app frame when a child session is long. */
 .subagents-page-body {
 	display: grid;
-	grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
-	align-content: start;
-	gap: var(--sp-3) var(--sp-4);
+	grid-template-columns: minmax(15rem, 18rem) minmax(0, 1fr);
+	gap: var(--sp-4);
 	flex: 1 1 auto;
 	min-width: 0;
 	min-height: 0;
-	padding-right: 2px;
-	overflow-x: hidden;
-	overflow-y: auto;
-	overscroll-behavior: contain;
+	overflow: hidden;
 }
 
 .subagents-note {
-	grid-column: 1 / -1;
 	margin: 0;
 	color: var(--text-caption);
 	font-size: var(--fs-caption);
@@ -1590,13 +1585,234 @@ option {
 	overflow-wrap: anywhere;
 }
 
-/* One step above the card meta text, under a hairline: the two sections have to read as
-   sections even when a column holds a single short card. */
-.subagents-page-body .column-title {
+.subagents-list-panel,
+.subagents-detail-page {
+	min-width: 0;
+	min-height: 0;
+	border: 1px solid var(--border-l1);
+	border-radius: var(--radius-lg);
+	background: var(--bg-layer-1);
+	overflow: hidden;
+}
+
+.subagents-list-panel {
+	display: flex;
+	flex-direction: column;
+}
+
+.subagents-list-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: var(--sp-2);
+	padding: 12px 14px;
+	border-bottom: 1px solid var(--border-l1);
+}
+
+.subagents-list-head .column-title {
+	color: var(--text-1);
+	font-size: var(--fs-md);
+}
+
+.subagents-list-count {
+	color: var(--text-caption);
+	font-size: var(--fs-caption);
+	font-variant-numeric: tabular-nums;
+	white-space: nowrap;
+}
+
+.subagents-list-scroll {
+	display: grid;
+	align-content: start;
+	gap: var(--sp-4);
+	min-width: 0;
+	min-height: 0;
+	padding: var(--sp-3);
+	overflow-x: hidden;
+	overflow-y: auto;
+	overscroll-behavior: contain;
+}
+
+.subagents-list-scroll .column-title {
 	padding-bottom: var(--sp-1);
 	border-bottom: 1px solid var(--border-l1);
 	color: var(--text-2);
 	font-size: var(--fs-md);
+}
+
+.subagents-detail-page {
+	display: flex;
+	flex-direction: column;
+}
+
+.subagents-detail-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: var(--sp-3);
+	min-width: 0;
+	padding: 14px 16px;
+	border-bottom: 1px solid var(--border-l1);
+}
+
+.subagents-detail-kicker {
+	margin: 0 0 2px;
+	color: var(--text-caption);
+	font-size: var(--fs-caption);
+}
+
+.subagents-detail-title {
+	margin: 0;
+	color: var(--text-1);
+	font-size: var(--fs-lg);
+	font-weight: 600;
+	overflow-wrap: anywhere;
+}
+
+.subagents-detail-state {
+	flex: none;
+	color: var(--ok);
+	font-size: var(--fs-sm);
+	text-transform: capitalize;
+}
+
+.subagents-detail-state[data-state="failed"],
+.subagents-detail-state[data-state="error"] {
+	color: var(--err);
+}
+
+.subagents-detail-empty {
+	display: grid;
+	place-items: center;
+	flex: 1 1 auto;
+	min-height: 16rem;
+	padding: var(--sp-5);
+	color: var(--text-3);
+	font-size: var(--fs-lg);
+	text-align: center;
+}
+
+.subagents-detail-empty p {
+	max-width: 34ch;
+	margin: 0;
+}
+
+.subagents-detail-scroll {
+	flex: 1 1 auto;
+	min-width: 0;
+	min-height: 0;
+	padding: var(--sp-4);
+	overflow-x: hidden;
+	overflow-y: auto;
+	overscroll-behavior: contain;
+}
+
+/* Async runs are options in the left list, not detail cards. The selected option is the
+   only one that can name the detail pane; fleet keys remain plain display-only cards. */
+.subagent-list-item {
+	display: grid;
+	align-items: start;
+	justify-content: stretch;
+	width: 100%;
+	min-width: 0;
+	padding: 10px 12px;
+	border-color: var(--border-l1);
+	border-radius: var(--radius-md);
+	background: var(--bg-layer-2);
+	text-align: left;
+}
+
+.subagent-list-item:hover:not(:disabled) {
+	border-color: var(--border-l3);
+	background: var(--hover);
+}
+
+.subagent-list-item[aria-selected="true"] {
+	border-color: var(--accent);
+	background: var(--accent-soft);
+	box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.subagent-list-item-title,
+.subagent-list-item-id,
+.subagent-list-item-meta,
+.subagent-list-item-goal {
+	display: block;
+	min-width: 0;
+	overflow-wrap: anywhere;
+}
+
+.subagent-list-item-title {
+	color: var(--text-1);
+	font-size: var(--fs-md);
+	font-weight: 600;
+}
+
+.subagent-list-item-id,
+.subagent-list-item-meta,
+.subagent-list-item-goal {
+	margin-top: 3px;
+	color: var(--text-caption);
+	font-size: var(--fs-caption);
+	white-space: pre-wrap;
+}
+
+.subagent-list-item-goal {
+	color: var(--text-3);
+}
+
+/* The selected run fills the detail pane. Transcript is deliberately first; Inspector follows
+   it and is opened by default for the selected run. */
+.subagents-detail-scroll > .subagent-run {
+	display: grid;
+	gap: var(--sp-4);
+	min-width: 0;
+	padding: 0;
+	border: 0;
+	background: transparent;
+}
+
+.subagents-detail-scroll > .subagent-run > .subagent-run-title,
+.subagents-detail-scroll > .subagent-run > .subagent-run-meta,
+.subagents-detail-scroll > .subagent-run > .subagent-run-goal {
+	margin-left: 2px;
+}
+
+.subagent-transcript,
+.subagent-inspector-section {
+	min-width: 0;
+	padding: var(--sp-3);
+	border: 1px solid var(--border-l1);
+	border-radius: var(--radius-md);
+	background: var(--bg-layer-1);
+}
+
+.subagent-section-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: var(--sp-3);
+	min-width: 0;
+}
+
+.subagent-section-title {
+	margin: 0;
+	color: var(--text-2);
+	font-size: var(--fs-md);
+	font-weight: 600;
+}
+
+.subagent-transcript .subagent-run-actions,
+.subagent-inspector-section .subagent-inspect {
+	margin-top: var(--sp-3);
+}
+
+.subagent-transcript .subagent-detail {
+	margin-top: var(--sp-3);
+}
+
+.subagent-inspector-section > .subagent-inspect {
+	margin-top: var(--sp-3);
 }
 
 /* ------------------------------------------------------------- subagents -- */
@@ -1932,10 +2148,24 @@ option {
 		overflow: visible;
 	}
 
-	/* The subagents page follows the same rule as the rail: one column, document flow. */
+	/* On a narrow viewport the master-detail columns stack, with both panes keeping their
+	   own scroll bounds instead of forcing a horizontal page scrollbar. */
 	.subagents-page-body {
 		grid-template-columns: minmax(0, 1fr);
 		overflow: visible;
+	}
+
+	.subagents-list-panel {
+		min-height: 14rem;
+		max-height: 24rem;
+	}
+
+	.subagents-list-scroll {
+		max-height: 20rem;
+	}
+
+	.subagents-detail-page {
+		min-height: 28rem;
 	}
 }
 

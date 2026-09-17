@@ -18,6 +18,13 @@ const elements = {
 	pageTabSubagents: document.getElementById("page-tab-subagents"),
 	chatPage: document.getElementById("chat-page"),
 	subagentsPage: document.getElementById("subagents-page"),
+	subagentsList: document.getElementById("subagents-list"),
+	subagentsListCount: document.getElementById("subagents-list-count"),
+	subagentsDetail: document.getElementById("subagents-detail"),
+	subagentsDetailHeading: document.getElementById("subagents-detail-heading"),
+	subagentsDetailState: document.getElementById("subagents-detail-state"),
+	subagentsDetailEmpty: document.getElementById("subagents-detail-empty"),
+	subagentsDetailContent: document.getElementById("subagents-detail-content"),
 	statusState: document.getElementById("status-state"),
 	statusCwd: document.getElementById("status-cwd"),
 	statusBranch: document.getElementById("status-branch"),
@@ -92,7 +99,11 @@ const state = {
 	subagentsSnapshot: null,
 	subagentsGeneration: null,
 	subagentsRefreshing: false,
+	subagentsSelectedRunId: null,
+	subagentsAutoLoadedRunIds: new Set(),
 	subagentDetails: new Map(),
+	subagentDetailRequests: new Set(),
+	subagentDetailErrors: new Map(),
 	subagentInspects: new Map(),
 	subagentInspectNodes: new Map(),
 	subagentOpenChildren: new Map(),
@@ -145,6 +156,11 @@ function selectPage(name, { focusTab = false } = {}) {
 		if (active && focusTab && typeof page.tab.focus === "function") {
 			page.tab.focus();
 		}
+	}
+	if (target.name === "subagents" && state.subagentsSelectedRunId) {
+		const runs = Array.isArray(state.subagentsSnapshot?.asyncSnapshot?.runs) ? state.subagentsSnapshot.asyncSnapshot.runs : [];
+		const run = runs.find((candidate) => candidate?.id === state.subagentsSelectedRunId);
+		if (run) ensureSelectedSubagent(run);
 	}
 }
 
@@ -530,12 +546,13 @@ function renderSummaryList(parent, title, values, className) {
 }
 
 function detailForRun(card, id) {
-	let detail = card.querySelector(".subagent-detail");
+	const host = card.querySelector(".subagent-transcript") ?? card;
+	let detail = host.querySelector(".subagent-detail");
 	if (!detail) {
 		detail = document.createElement("details");
 		detail.className = "subagent-detail";
 		detail.dataset.id = id;
-		card.append(detail);
+		host.append(detail);
 	}
 	return detail;
 }
@@ -554,12 +571,35 @@ function renderSubagentDetail(card, id, payload) {
 	}
 }
 
+function currentSubagentDetailCard(id) {
+	const card = elements.subagentsDetailContent?.querySelector(".subagent-run");
+	return card?.dataset.runId === id ? card : null;
+}
+
 async function requestSubagentDetail(card, id, button, resultElement) {
+	const currentCard = currentSubagentDetailCard(id);
+	if (currentCard) {
+		card = currentCard;
+		button = card.querySelector(".subagent-transcript-button") ?? button;
+		resultElement = card.querySelector(".subagent-transcript-result") ?? resultElement;
+	}
 	if (state.generation === null || typeof id !== "string" || id.length === 0) {
 		resultElement.textContent = "The current async run is not available.";
 		resultElement.dataset.state = "error";
 		return;
 	}
+	const cached = state.subagentDetails.get(id);
+	if (cached && typeof cached === "object") {
+		renderSubagentDetail(card, id, cached);
+		resultElement.textContent = "Transcript detail loaded.";
+		resultElement.dataset.state = "ok";
+		return;
+	}
+	if (state.subagentDetailRequests.has(id)) {
+		return;
+	}
+	state.subagentDetailErrors.delete(id);
+	state.subagentDetailRequests.add(id);
 	button.disabled = true;
 	resultElement.textContent = "Loading transcript detail…";
 	resultElement.dataset.state = "waiting";
@@ -571,20 +611,34 @@ async function requestSubagentDetail(card, id, button, resultElement) {
 		const payload = await response.json().catch(() => ({}));
 		if (!response.ok) {
 			const code = payload?.error?.code ?? `http_${response.status}`;
-			resultElement.textContent = `Transcript unavailable (${code}): ${payload?.error?.message ?? "unknown reason"}`;
-			resultElement.dataset.state = "error";
+			const message = payload?.error?.message ?? "unknown reason";
+			state.subagentDetailErrors.set(id, { code, message });
+			const targetCard = currentSubagentDetailCard(id) ?? card;
+			const targetResult = targetCard.querySelector(".subagent-transcript-result") ?? resultElement;
+			targetResult.textContent = `Transcript unavailable (${code}): ${message}`;
+			targetResult.dataset.state = "error";
 			if (response.status === 401) handleUnauthorized();
 			return;
 		}
-		renderSubagentDetail(card, id, payload);
 		state.subagentDetails.set(id, payload);
-		resultElement.textContent = "Transcript detail loaded.";
-		resultElement.dataset.state = "ok";
+		state.subagentDetailErrors.delete(id);
+		const targetCard = currentSubagentDetailCard(id) ?? card;
+		const targetResult = targetCard.querySelector(".subagent-transcript-result") ?? resultElement;
+		renderSubagentDetail(targetCard, id, payload);
+		targetResult.textContent = "Transcript detail loaded.";
+		targetResult.dataset.state = "ok";
 	} catch (error) {
-		resultElement.textContent = `Transcript request failed: ${error instanceof Error ? error.message : String(error)}`;
-		resultElement.dataset.state = "error";
+		const message = error instanceof Error ? error.message : String(error);
+		state.subagentDetailErrors.set(id, { code: "network", message });
+		const targetCard = currentSubagentDetailCard(id) ?? card;
+		const targetResult = targetCard.querySelector(".subagent-transcript-result") ?? resultElement;
+		targetResult.textContent = `Transcript request failed: ${message}`;
+		targetResult.dataset.state = "error";
 	} finally {
-		button.disabled = false;
+		state.subagentDetailRequests.delete(id);
+		const targetCard = currentSubagentDetailCard(id) ?? card;
+		const targetButton = targetCard.querySelector(".subagent-transcript-button") ?? button;
+		targetButton.disabled = false;
 	}
 }
 
@@ -1045,8 +1099,9 @@ function toggleInspect(nodes) {
 }
 
 /** Collapsed-by-default toggle + panel for one run or one id-bearing child node. */
-function buildInspectPanel({ runId, childId = null, label, keyPrefix = "run" }) {
-	const key = inspectKey(runId, childId, keyPrefix);	inspectEntry(key, runId);
+function buildInspectPanel({ runId, childId = null, label, keyPrefix = "run", open = false }) {
+	const key = inspectKey(runId, childId, keyPrefix);
+	inspectEntry(key, runId, { open });
 	inspectPanelSeq += 1;
 	const panelId = `subagent-inspect-panel-${inspectPanelSeq}`;
 	const container = document.createElement("div");
@@ -1134,15 +1189,12 @@ function renderChildrenList(card, run) {
 	card.append(details);
 }
 
-function renderAsyncRun(run) {
-	const card = document.createElement("article");
-	card.className = "subagent-run";
-	const title = document.createElement("h4");
-	title.className = "subagent-run-title";
-	title.textContent = run.label ? `${run.label} (${subagentValue(run.id)})` : `Async run ${subagentValue(run.id)}`;
-	card.append(title);
-	// Only the fields this run actually reports: a running run has no `ended`, and an omitted
-	// model is not "Unknown", it is simply not part of the answer.
+function asyncRunTitle(run) {
+	return run.label ? `${run.label} (${subagentValue(run.id)})` : `Async run ${subagentValue(run.id)}`;
+}
+
+function asyncRunMeta(run) {
+	// Only fields this run actually reports: an omitted value is not fabricated as Unknown.
 	const meta = [];
 	if (typeof run.state === "string" && run.state.length > 0) meta.push(`state: ${run.state}`);
 	if (typeof run.mode === "string" && run.mode.length > 0) meta.push(`mode: ${run.mode}`);
@@ -1150,29 +1202,137 @@ function renderAsyncRun(run) {
 	if (typeof run.startedAt === "number") meta.push(`started: ${subagentTime(run.startedAt)}`);
 	if (typeof run.updatedAt === "number") meta.push(`last update: ${subagentTime(run.updatedAt)}`);
 	if (typeof run.endedAt === "number") meta.push(`ended: ${subagentTime(run.endedAt)}`);
-	if (meta.length > 0) appendSubagentText(card, "subagent-run-meta", meta.join(" · "));
+	return meta.join(" · ");
+}
+
+function asyncRunIds() {
+	const runs = Array.isArray(state.subagentsSnapshot?.asyncSnapshot?.runs) ? state.subagentsSnapshot.asyncSnapshot.runs : [];
+	return runs.filter((run) => typeof run?.id === "string" && run.id.length > 0).map((run) => run.id);
+}
+
+function selectSubagentRun(id, { focus = false } = {}) {
+	if (!asyncRunIds().includes(id)) {
+		return;
+	}
+	state.subagentsSelectedRunId = id;
+	for (const item of elements.subagentsAsync?.querySelectorAll(".subagent-list-item") ?? []) {
+		const selected = item.dataset.runId === id;
+		item.setAttribute("aria-selected", selected ? "true" : "false");
+		item.tabIndex = selected ? 0 : -1;
+	}
+	const runs = Array.isArray(state.subagentsSnapshot?.asyncSnapshot?.runs) ? state.subagentsSnapshot.asyncSnapshot.runs : [];
+	const run = runs.find((candidate) => candidate?.id === id);
+	if (run) {
+		renderSelectedSubagent(run, { autoLoad: true });
+	}
+	if (focus) {
+		const selected = [...(elements.subagentsAsync?.children ?? [])].find((item) => item.dataset.runId === id);
+		if (typeof selected?.focus === "function") selected.focus();
+	}
+}
+
+function renderAsyncListItem(run, index, total) {
+	const item = document.createElement("button");
+	item.type = "button";
+	item.className = "subagent-list-item";
+	item.dataset.runId = run.id;
+	item.setAttribute("role", "option");
+	item.setAttribute("aria-controls", "subagents-detail-content");
+	item.setAttribute("aria-label", asyncRunTitle(run));
+	const selected = state.subagentsSelectedRunId === run.id;
+	item.setAttribute("aria-selected", selected ? "true" : "false");
+	item.tabIndex = selected ? 0 : -1;
+	const title = document.createElement("span");
+	title.className = "subagent-list-item-title";
+	title.textContent = run.label || `Async run ${subagentValue(run.id)}`;
+	const id = document.createElement("span");
+	id.className = "subagent-list-item-id";
+	id.textContent = `run: ${run.id}`;
+	const meta = document.createElement("span");
+	meta.className = "subagent-list-item-meta";
+	meta.textContent = asyncRunMeta(run);
+	item.append(title, id, meta);
+	if (run.goal) {
+		const goal = document.createElement("span");
+		goal.className = "subagent-list-item-goal";
+		goal.textContent = run.goal;
+		item.append(goal);
+	}
+	item.addEventListener("click", () => selectSubagentRun(run.id, { focus: true }));
+	item.addEventListener("keydown", (event) => {
+		const key = event?.key;
+		if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(key)) return;
+		event.preventDefault();
+		const next = key === "Home" ? 0 : key === "End" ? total - 1 : (index + (key === "ArrowUp" ? -1 : 1) + total) % total;
+		selectSubagentRun(asyncRunIds()[next], { focus: true });
+	});
+	return item;
+}
+
+function renderAsyncRun(run, { inspectorOpen = false } = {}) {
+	const card = document.createElement("article");
+	card.className = "subagent-run";
+	card.dataset.runId = run.id;
+	const title = document.createElement("h4");
+	title.className = "subagent-run-title";
+	title.textContent = asyncRunTitle(run);
+	card.append(title);
+	const meta = asyncRunMeta(run);
+	if (meta) appendSubagentText(card, "subagent-run-meta", meta);
 	if (run.goal) appendSubagentText(card, "subagent-run-goal", `goal: ${run.goal}`);
+
+	const transcript = document.createElement("section");
+	transcript.className = "subagent-transcript";
+	const transcriptHead = document.createElement("div");
+	transcriptHead.className = "subagent-section-head";
+	const transcriptTitle = document.createElement("h5");
+	transcriptTitle.className = "subagent-section-title";
+	transcriptTitle.textContent = "Transcript";
+	transcriptHead.append(transcriptTitle);
 	const actions = document.createElement("div");
 	actions.className = "subagent-run-actions";
 	const button = document.createElement("button");
 	button.type = "button";
-	// Both run actions are read-only and secondary: they share one compact pill size so a
-	// page full of runs does not become a wall of buttons.
-	button.className = "ghost small";
+	button.className = "subagent-transcript-button ghost small";
 	button.textContent = "View transcript";
 	const result = document.createElement("p");
-	result.className = "subagent-run-meta";
+	result.className = "subagent-transcript-result subagent-run-meta";
 	result.dataset.state = "";
 	button.addEventListener("click", () => requestSubagentDetail(card, run.id, button, result));
 	actions.append(button, result);
-	card.append(actions);
-	// The two views are not alternatives: the inspector renders whatever shape pi-subagents
-	// serves for this run (structured child session for async, transcript for a blocking run),
-	// while the artifact tail below stays the page's own raw fallback. That explanation lives
-	// once on the page: repeating it inside every run is what used to fill the rail.
-	card.append(buildInspectPanel({ runId: run.id, label: `Read-only inspector for async run ${run.id}` }));
+	transcriptHead.append(actions);
+	transcript.append(transcriptHead);
+	card.append(transcript);
+
+	const inspectorSection = document.createElement("section");
+	inspectorSection.className = "subagent-inspector-section";
+	const inspectorTitle = document.createElement("h5");
+	inspectorTitle.className = "subagent-section-title";
+	inspectorTitle.textContent = "Inspector";
+	inspectorSection.append(inspectorTitle, buildInspectPanel({
+		runId: run.id,
+		label: `Read-only inspector for async run ${run.id}`,
+		open: inspectorOpen,
+	}));
+	card.append(inspectorSection);
 	renderChildrenList(card, run);
 	renderSummaryList(card, "Result summaries", run.results, "subagent-results");
+
+	const cached = state.subagentDetails.get(run.id);
+	if (cached && typeof cached === "object") {
+		renderSubagentDetail(card, run.id, cached);
+		result.textContent = "Transcript detail loaded.";
+		result.dataset.state = "ok";
+	} else if (state.subagentDetailRequests.has(run.id)) {
+		result.textContent = "Loading transcript detail…";
+		result.dataset.state = "waiting";
+	} else {
+		const error = state.subagentDetailErrors.get(run.id);
+		if (error) {
+			result.textContent = `Transcript unavailable (${error.code}): ${error.message}`;
+			result.dataset.state = "error";
+		}
+	}
 	return card;
 }
 
@@ -1227,8 +1387,94 @@ function subagentsStatusText(snapshot) {
 	return ["Unavailable", "unavailable", code === "rpc_unavailable" ? "pi-subagents in-process RPC is unavailable." : `pi-subagents status unavailable (${code}): ${message}`];
 }
 
-/** Render the bounded fleet and async-run DTO projection into the subagents page; refresh is
- *  explicit only, and nothing here needs the page to be the one on screen. */
+function setSubagentsEmptyMessage(message) {
+	const paragraph = elements.subagentsDetailEmpty.querySelector("p");
+	if (paragraph) {
+		paragraph.textContent = message;
+	} else {
+		elements.subagentsDetailEmpty.textContent = message;
+	}
+}
+
+function updateSelectedSubagentHeader(run) {
+	if (!run) {
+		elements.subagentsDetailHeading.textContent = "No run selected";
+		elements.subagentsDetailState.textContent = "";
+		elements.subagentsDetailState.dataset.state = "";
+		return;
+	}
+	elements.subagentsDetailHeading.textContent = asyncRunTitle(run);
+	elements.subagentsDetailState.textContent = typeof run.state === "string" && run.state.length > 0 ? run.state : "";
+	elements.subagentsDetailState.dataset.state = typeof run.state === "string" ? run.state : "";
+}
+
+function startSelectedSubagentReads(card, run) {
+	if (state.subagentsAutoLoadedRunIds.has(run.id)) {
+		return;
+	}
+	state.subagentsAutoLoadedRunIds.add(run.id);
+	// Opening the selected page is an explicit read-only viewing action. Show both halves of the
+	// detail pane once: transcript first, inspector second. The maps/sets keep later polls from
+	// repeating either read, while the buttons remain available for an explicit cached retry.
+	const transcriptButton = card.querySelector(".subagent-transcript-button");
+	const transcriptResult = card.querySelector(".subagent-transcript-result");
+	if (transcriptButton && transcriptResult) {
+		requestSubagentDetail(card, run.id, transcriptButton, transcriptResult);
+	}
+	const inspectKeyForRun = inspectKey(run.id);
+	const inspectNodes = state.subagentInspectNodes.get(inspectKeyForRun);
+	const inspectEntryForRun = state.subagentInspects.get(inspectKeyForRun);
+	if (inspectNodes && inspectEntryForRun?.status === "idle") {
+		requestInspect(inspectNodes);
+	}
+}
+
+function renderSelectedSubagent(run, { autoLoad = false } = {}) {
+	updateSelectedSubagentHeader(run);
+	if (!run || typeof run.id !== "string" || run.id.length === 0) {
+		setSubagentsEmptyMessage("Select an async run from the list to view its transcript and inspector.");
+		elements.subagentsDetailEmpty.classList.remove("hidden");
+		elements.subagentsDetailContent.classList.add("hidden");
+		clearElement(elements.subagentsDetailContent);
+		return;
+	}
+	elements.subagentsDetailEmpty.classList.add("hidden");
+	elements.subagentsDetailContent.classList.remove("hidden");
+	clearElement(elements.subagentsDetailContent);
+	const card = renderAsyncRun(run, { inspectorOpen: autoLoad });
+	elements.subagentsDetailContent.append(card);
+
+	if (autoLoad) {
+		startSelectedSubagentReads(card, run);
+	}
+}
+
+function ensureSelectedSubagent(run) {
+	const card = currentSubagentDetailCard(run.id);
+	if (!card) {
+		renderSelectedSubagent(run, { autoLoad: true });
+		return;
+	}
+	const key = inspectKey(run.id);
+	const nodes = state.subagentInspectNodes.get(key);
+	const entry = state.subagentInspects.get(key);
+	if (!state.subagentsAutoLoadedRunIds.has(run.id) && entry && !entry.open) {
+		entry.open = true;
+		if (nodes) paintInspect(nodes);
+	}
+	startSelectedSubagentReads(card, run);
+}
+
+function updateSubagentListSelection() {
+	for (const item of elements.subagentsAsync?.querySelectorAll(".subagent-list-item") ?? []) {
+		const selected = item.dataset.runId === state.subagentsSelectedRunId;
+		item.setAttribute("aria-selected", selected ? "true" : "false");
+		item.tabIndex = selected ? 0 : -1;
+	}
+}
+
+/** Select the first real async run by default, then render the selected run's master-detail
+ *  view. Fleet keys stay display-only and never enter this selection path. */
 function renderSubagents(snapshot) {
 	state.subagentsSnapshot = snapshot && typeof snapshot === "object" ? snapshot : null;
 	state.subagentsGeneration = state.generation;
@@ -1243,17 +1489,15 @@ function renderSubagents(snapshot) {
 	clearElement(elements.subagentsAsync);
 	const fleetEntries = Array.isArray(state.subagentsSnapshot?.fleet?.entries) ? state.subagentsSnapshot.fleet.entries : [];
 	const asyncRuns = Array.isArray(state.subagentsSnapshot?.asyncSnapshot?.runs) ? state.subagentsSnapshot.asyncSnapshot.runs : [];
+	const selectableRuns = asyncRuns.filter((run) => typeof run?.id === "string" && run.id.length > 0);
+	const activeRunIds = new Set(selectableRuns.map((run) => run.id));
+	elements.subagentsListCount.textContent = `${fleetEntries.length} fleet · ${selectableRuns.length} selectable`;
+
 	// The page is rebuilt on every snapshot revision: drop the DOM registry of the previous
-	// pass and every cached structured view whose run is gone, so neither can grow unbounded.
-	// Only the page's own `run:` key space is touched: a chat row owns a `chat:` panel whose
-	// node is *not* rebuilt by this pass, and whose run may legitimately have left the bounded
-	// snapshot, so clearing or pruning it here would strand it on its previous paint.
+	// pass and every cached page view whose run is gone, while leaving chat-scoped inspectors
+	// untouched. The bounds in the host snapshot therefore also bound the browser registries.
 	for (const key of [...state.subagentInspectNodes.keys()]) {
 		if (key.startsWith(PAGE_INSPECT_KEY_PREFIX)) state.subagentInspectNodes.delete(key);
-	}
-	const activeRunIds = new Set();
-	for (const run of asyncRuns) {
-		if (run && typeof run.id === "string") activeRunIds.add(run.id);
 	}
 	for (const [key, entry] of [...state.subagentInspects]) {
 		if (key.startsWith(PAGE_INSPECT_KEY_PREFIX) && !activeRunIds.has(entry.runId)) state.subagentInspects.delete(key);
@@ -1261,12 +1505,32 @@ function renderSubagents(snapshot) {
 	for (const runId of [...state.subagentOpenChildren.keys()]) {
 		if (!activeRunIds.has(runId)) state.subagentOpenChildren.delete(runId);
 	}
+	for (const runId of [...state.subagentsAutoLoadedRunIds]) {
+		if (!activeRunIds.has(runId)) state.subagentsAutoLoadedRunIds.delete(runId);
+	}
+	for (const runId of [...state.subagentDetails.keys()]) {
+		if (!activeRunIds.has(runId)) state.subagentDetails.delete(runId);
+	}
+	for (const runId of [...state.subagentDetailErrors.keys()]) {
+		if (!activeRunIds.has(runId)) state.subagentDetailErrors.delete(runId);
+	}
+	if (!activeRunIds.has(state.subagentsSelectedRunId)) {
+		state.subagentsSelectedRunId = selectableRuns[0]?.id ?? null;
+	}
 	for (const entry of fleetEntries) elements.subagentsFleet.append(renderFleetEntry(entry));
-	for (const run of asyncRuns) {
-		if (run && typeof run.id === "string") elements.subagentsAsync.append(renderAsyncRun(run));
+	for (const [index, run] of selectableRuns.entries()) {
+		elements.subagentsAsync.append(renderAsyncListItem(run, index, selectableRuns.length));
 	}
 	elements.subagentsFleetEmpty.classList.toggle("hidden", fleetEntries.length > 0);
-	elements.subagentsAsyncEmpty.classList.toggle("hidden", asyncRuns.length > 0);
+	elements.subagentsAsyncEmpty.classList.toggle("hidden", selectableRuns.length > 0);
+	updateSubagentListSelection();
+	const selectedRun = selectableRuns.find((run) => run.id === state.subagentsSelectedRunId) ?? null;
+	if (!selectedRun) {
+		setSubagentsEmptyMessage(selectableRuns.length === 0
+			? "No async run with a readable run id is available in the current snapshot."
+			: "Select an async run from the list to view its transcript and inspector.");
+	}
+	renderSelectedSubagent(selectedRun, { autoLoad: Boolean(selectedRun) && state.page === "subagents" });
 }
 
 async function refreshSubagents() {
@@ -2127,9 +2391,13 @@ async function poll() {
 			state.rendered.clear();
 			resetChatState();
 			state.subagentDetails.clear();
+			state.subagentDetailRequests.clear();
+			state.subagentDetailErrors.clear();
 			state.subagentInspects.clear();
 			state.subagentInspectNodes.clear();
 			state.subagentOpenChildren.clear();
+			state.subagentsSelectedRunId = null;
+			state.subagentsAutoLoadedRunIds.clear();
 			state.subagentsSnapshot = null;
 			state.subagentsGeneration = null;
 		}

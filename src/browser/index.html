@@ -163,11 +163,9 @@
 					</aside>
 				</div>
 
-				<!-- Subagents is a page, not a rail disclosure: the tab above swaps it in for the
-				     chat column and its rail, so an opened inspector or a long child transcript gets
-				     the whole workspace. Everything here stays read-only: Refresh re-reads the
-				     snapshot and the only actions are Inspect / View transcript on what
-				     pi-subagents already reported. -->
+				<!-- Subagents is a page, not a rail disclosure. It uses a master-detail layout:
+				     the left list names the available work, while the selected run gets the full
+				     right-hand workspace for its transcript and read-only inspector. -->
 				<section id="subagents-page" class="subagents-page hidden" role="tabpanel" aria-labelledby="page-tab-subagents">
 					<header class="page-head">
 						<h2 id="subagents-heading" class="page-title">Subagents</h2>
@@ -178,17 +176,38 @@
 						</div>
 					</header>
 					<p id="subagents-status" class="page-status" role="status">Subagent status is unavailable.</p>
-					<div class="subagents-page-body" role="region" aria-label="Read-only subagent fleet and async runs" tabindex="0">
-						<p class="subagents-note">Inspector = what pi-subagents serves for a run (a structured child session, or a transcript for blocking runs). The artifact tail under View transcript is the raw fallback.</p>
-						<section class="subagents-column" aria-labelledby="subagents-fleet-heading">
-							<h3 id="subagents-fleet-heading" class="column-title">Fleet</h3>
-							<div id="subagents-fleet" class="subagents-list"></div>
-							<p id="subagents-fleet-empty" class="empty">No fleet entries.</p>
-						</section>
-						<section class="subagents-column" aria-labelledby="subagents-async-heading">
-							<h3 id="subagents-async-heading" class="column-title">Async runs</h3>
-							<div id="subagents-async" class="subagents-list"></div>
-							<p id="subagents-async-empty" class="empty">No async runs.</p>
+					<p class="subagents-note">Inspector = what pi-subagents serves for a run (a structured child session, or a transcript for blocking runs). The artifact tail under View transcript is the raw fallback.</p>
+					<div class="subagents-page-body">
+						<aside class="subagents-list-panel" aria-labelledby="subagents-list-heading">
+							<header class="subagents-list-head">
+								<h3 id="subagents-list-heading" class="column-title">Subagents list</h3>
+								<span id="subagents-list-count" class="subagents-list-count"></span>
+							</header>
+							<div id="subagents-list" class="subagents-list-scroll">
+								<section class="subagents-column" aria-labelledby="subagents-fleet-heading">
+									<h3 id="subagents-fleet-heading" class="column-title">Fleet</h3>
+									<div id="subagents-fleet" class="subagents-list"></div>
+									<p id="subagents-fleet-empty" class="empty">No fleet entries.</p>
+								</section>
+								<section class="subagents-column" aria-labelledby="subagents-async-heading">
+									<h3 id="subagents-async-heading" class="column-title">Async runs</h3>
+									<div id="subagents-async" class="subagents-list" role="listbox" aria-label="Selectable async subagent runs"></div>
+									<p id="subagents-async-empty" class="empty">No async runs.</p>
+								</section>
+							</div>
+						</aside>
+						<section id="subagents-detail" class="subagents-detail-page" aria-labelledby="subagents-detail-heading">
+							<header class="subagents-detail-head">
+								<div>
+									<p class="subagents-detail-kicker">Selected subagent</p>
+									<h3 id="subagents-detail-heading" class="subagents-detail-title">No run selected</h3>
+								</div>
+								<span id="subagents-detail-state" class="subagents-detail-state"></span>
+							</header>
+							<div id="subagents-detail-empty" class="subagents-detail-empty" role="status">
+								<p>Select an async run from the list to view its transcript and inspector.</p>
+						</div>
+							<div id="subagents-detail-content" class="subagents-detail-scroll hidden"></div>
 						</section>
 					</div>
 				</section>

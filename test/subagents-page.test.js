@@ -52,16 +52,20 @@ test("renders bounded fleet/async sections and requests transcript details on de
 		return originalFetch(path, options);
 	};
 	globalThis.fetch = environment.fetch;
-	const button = asyncRuns.children[0].querySelector("button");
+	const listItem = asyncRuns.children[0];
+	assert.equal(listItem.getAttribute("role"), "option");
+	assert.equal(listItem.getAttribute("aria-selected"), "true");
+	const card = runCard(environment);
+	const button = card.querySelector(".subagent-transcript-button");
 	button.click();
 	await flushTasks();
 	const detailCall = environment.fetchCalls.find((call) => call.path === "/api/subagents/details");
 	assert.ok(detailCall);
 	assert.deepEqual(JSON.parse(detailCall.options.body), { generation: 3, id: "real-async-id" });
-	assert.match(asyncRuns.children[0].textContent, /safe transcript/);
-	assert.match(asyncRuns.children[0].querySelector("pre").textContent, /<script>not markup<\/script>/);
+	assert.match(card.textContent, /safe transcript/);
+	assert.match(card.querySelector("pre").textContent, /<script>not markup<\/script>/);
 	// The inspector/transcript explanation lives once on the page, not inside every run.
-	assert.equal(asyncRuns.children[0].querySelector(".subagent-run-note"), null);
+	assert.equal(card.querySelector(".subagent-run-note"), null);
 	assert.equal(page.state.subagentsSnapshot.state, "ready-data");
 });
 
@@ -143,6 +147,111 @@ test("keeps timeout, RPC error, and omitted data visibly distinct", async () => 
 });
 
 /* -------------------------------------------------------------- page wiring -- */
+
+test("uses a selectable list with a transcript-first detail pane and a default inspector", async () => {
+	const environment = createFakeEnvironment({ token: "e".repeat(64) });
+	environment.setSnapshot({ revision: 1, generation: 6, pending: [], reloading: false });
+	restore = installPageGlobals(environment);
+	const page = await importPage({ bust: `subagents-master-detail-${++bust}` });
+	await environment.runNextTimer();
+	const inspectCalls = [];
+	const originalFetch = environment.fetch;
+	environment.fetch = async (path, options = {}) => {
+		environment.fetchCalls.push({ path, options });
+		if (path === "/api/subagents/inspect") {
+			inspectCalls.push({ path, options });
+			const id = JSON.parse(options.body).id;
+			return inspectOk({
+				asyncId: id,
+				status: "complete",
+				label: id === "run-1" ? "First run" : "Second run",
+				task: "inspect the selected run",
+				messages: [{ role: "assistant", kind: "text", text: "inspected" }],
+				finalOutput: "done",
+				truncated: { task: false, messages: 0, finalOutput: false },
+			});
+		}
+		if (path === "/api/subagents/details") {
+			const id = JSON.parse(options.body).id;
+			return { ok: true, status: 200, json: async () => ({ ok: true, id, text: "raw transcript", summary: { id, state: "complete" } }) };
+		}
+		return originalFetch(path, options);
+	};
+	globalThis.fetch = environment.fetch;
+	environment.setSnapshot({
+		revision: 2,
+		generation: 6,
+		pending: [],
+		reloading: false,
+		subagents: {
+			available: true,
+			state: "ready-data",
+			fleet: { entries: [{ key: "display-only-fleet-key", agent: "scout" }], omitted: 0 },
+			asyncSnapshot: { runs: [
+				{ id: "run-1", label: "First run", state: "running", mode: "subagent", updatedAt: 1700000001000 },
+				{ id: "run-2", label: "Second run", state: "queued", mode: "subagent", updatedAt: 1700000002000 },
+			], omitted: { runs: 0, children: 0, byteLimitExceeded: false } },
+		},
+	});
+	await environment.runNextTimer();
+
+	const list = environment.document.getElementById("subagents-async");
+	assert.equal(list.children.length, 2);
+	assert.equal(list.children[0].getAttribute("role"), "option");
+	assert.equal(list.children[0].getAttribute("aria-selected"), "true");
+	assert.equal(list.children[1].getAttribute("aria-selected"), "false");
+	assert.equal(page.state.subagentsSelectedRunId, "run-1");
+	const card = runCard(environment);
+	assert.ok(card.querySelector(".subagent-transcript"), "the selected detail starts with a transcript section");
+	assert.ok(card.querySelector(".subagent-inspector-section"), "the selected detail has a separate inspector section");
+	assert.equal(card.querySelector(".subagent-transcript").parent, card);
+	assert.equal(card.querySelector(".subagent-inspector-section").parent, card);
+	assert.equal(inspectCalls.length, 0, "hidden Subagents does not fetch until the reader opens its page");
+
+	environment.document.getElementById("page-tab-subagents").click();
+	await flushTasks();
+	assert.equal(inspectCalls.length, 1);
+	assert.deepEqual(JSON.parse(inspectCalls[0].options.body), { generation: 6, id: "run-1" });
+	assert.ok(environment.fetchCalls.some((call) => call.path === "/api/subagents/details"), "the selected page loads the transcript once");
+	assert.equal(card.querySelector(".subagent-inspect-panel").classList.contains("hidden"), false);
+	assert.equal(card.querySelector(".subagent-inspect-toggle").textContent, "Hide inspector");
+	assert.match(card.querySelector(".subagent-transcript").textContent, /raw transcript/);
+
+	// Selecting another list item replaces only the right-hand detail and uses that item's real id.
+	list.children[1].click();
+	await flushTasks();
+	assert.equal(page.state.subagentsSelectedRunId, "run-2");
+	assert.equal(list.children[0].getAttribute("aria-selected"), "false");
+	assert.equal(list.children[1].getAttribute("aria-selected"), "true");
+	assert.match(runCard(environment).textContent, /Second run/);
+	assert.equal(inspectCalls.length, 2);
+	assert.deepEqual(JSON.parse(inspectCalls[1].options.body), { generation: 6, id: "run-2" });
+
+	// Clicking the visible transcript action again uses the cached read and does not move it into the inspector.
+	runCard(environment).querySelector(".subagent-transcript-button").click();
+	await flushTasks();
+	assert.match(runCard(environment).querySelector(".subagent-transcript").textContent, /raw transcript/);
+	assert.equal(runCard(environment).querySelector(".subagent-inspect-panel").textContent.includes("raw transcript"), false);
+
+	// A later poll updates the page card but reuses the completed inspector cache.
+	environment.setSnapshot({
+		revision: 3,
+		generation: 6,
+		pending: [],
+		reloading: false,
+		subagents: {
+			available: true,
+			state: "ready-data",
+			revision: 3,
+			fleet: { entries: [], omitted: 0 },
+			asyncSnapshot: { runs: [{ id: "run-1", label: "First run", state: "completed" }], omitted: { runs: 0, children: 0, byteLimitExceeded: false } },
+		},
+	});
+	await environment.runNextTimer();
+	assert.equal(inspectCalls.length, 2);
+	assert.equal(page.state.subagentsSelectedRunId, "run-1");
+	assert.equal(runCard(environment).querySelector(".subagent-inspect-toggle").textContent, "Hide inspector");
+});
 
 test("refreshes from the page's own control with the current generation", async () => {
 	const environment = createFakeEnvironment({ token: "f".repeat(64) });
@@ -305,7 +414,7 @@ const SUCCESS_INSPECT = {
 };
 
 function runCard(environment) {
-	return environment.document.getElementById("subagents-async").children[0];
+	return environment.document.getElementById("subagents-detail-content").querySelector(".subagent-run");
 }
 
 test("sends no structured inspection until the run action is clicked, then renders the payload as text", async () => {
@@ -433,7 +542,7 @@ test("opens the structured view from the chat row of a subagent tool result", as
 	assert.equal(chatPanel.querySelector(".subagent-inspect-panel").classList.contains("hidden"), false);
 	assert.match(chatPanel.textContent, /structured-probe/);
 	// The chat scope keeps its own panel state: the page's view of the same run is untouched.
-	assert.equal(environment.document.getElementById("subagents-async").querySelector(".subagent-inspect-panel").classList.contains("hidden"), true);
+	assert.equal(runCard(environment).querySelector(".subagent-inspect-panel").classList.contains("hidden"), true);
 });
 
 test("repaints a chat structured view after the next poll rebuilt the subagents page", async () => {
