@@ -17,6 +17,16 @@
 						<span class="tag">prototype</span>
 					</h1>
 				</div>
+				<!-- Two pages live in this document: Chat owns the transcript and the session rail,
+				     Subagents owns the read-only fleet/async view. The tab row stays in the top bar,
+				     so the way back is reachable from either page, and the switch belongs to the
+				     reader: polling and reloads never change the page under them. -->
+				<nav class="page-nav" aria-label="Pages">
+					<div class="page-tabs" role="tablist" aria-label="Pages">
+						<button id="page-tab-chat" class="page-tab" type="button" role="tab" aria-selected="true" aria-controls="chat-page">Chat</button>
+						<button id="page-tab-subagents" class="page-tab" type="button" role="tab" aria-selected="false" aria-controls="subagents-page" tabindex="-1">Subagents</button>
+					</div>
+				</nav>
 				<div class="topbar-tools">
 					<p id="connection" class="connection" data-state="connecting">Connecting…</p>
 					<form id="reload-form" class="reload-bar">
@@ -39,7 +49,7 @@
 					</form>
 				</section>
 
-				<div class="workspace">
+				<div id="chat-page" class="workspace" role="tabpanel" aria-labelledby="page-tab-chat">
 					<section class="chat" aria-labelledby="chat-heading">
 						<h2 id="chat-heading" class="sr-only">Chat</h2>
 
@@ -114,7 +124,7 @@
 						<details class="rail-card" open>
 							<summary class="rail-head">
 								<h2 id="status-heading" class="rail-title">Session</h2>
-								<span id="status-state" class="rail-state status-state">Unavailable</span>
+								<span id="status-state" class="state-label status-state">Unavailable</span>
 							</summary>
 							<div class="rail-body">
 								<div class="rail-line">
@@ -136,29 +146,6 @@
 							</div>
 						</details>
 
-						<details class="rail-card" open>
-							<summary class="rail-head">
-								<h2 id="subagents-heading" class="rail-title">Subagents</h2>
-								<span id="subagents-state" class="rail-state subagents-state">Unavailable</span>
-							</summary>
-							<div class="rail-body">
-								<p id="subagents-status" class="rail-status" role="status">Subagent status is unavailable.</p>
-								<div class="rail-actions">
-									<button id="subagents-refresh" class="ghost small" type="button">Refresh</button>
-								</div>
-								<section class="subagents-column" aria-labelledby="subagents-fleet-heading">
-									<h3 id="subagents-fleet-heading" class="column-title">Fleet</h3>
-									<div id="subagents-fleet" class="subagents-list"></div>
-									<p id="subagents-fleet-empty" class="empty">No fleet entries.</p>
-								</section>
-								<section class="subagents-column" aria-labelledby="subagents-async-heading">
-									<h3 id="subagents-async-heading" class="column-title">Async runs</h3>
-									<div id="subagents-async" class="subagents-list"></div>
-									<p id="subagents-async-empty" class="empty">No async runs.</p>
-								</section>
-							</div>
-						</details>
-
 						<section class="rail-note">
 							<p class="lead">Answers are sent only when you submit them. Nothing is auto-approved.</p>
 							<details class="notes">
@@ -175,6 +162,36 @@
 						</section>
 					</aside>
 				</div>
+
+				<!-- Subagents is a page, not a rail disclosure: the tab above swaps it in for the
+				     chat column and its rail, so an opened inspector or a long child transcript gets
+				     the whole workspace. Everything here stays read-only: Refresh re-reads the
+				     snapshot and the only actions are Inspect / View transcript on what
+				     pi-subagents already reported. -->
+				<section id="subagents-page" class="subagents-page hidden" role="tabpanel" aria-labelledby="page-tab-subagents">
+					<header class="page-head">
+						<h2 id="subagents-heading" class="page-title">Subagents</h2>
+						<div class="page-tools">
+							<span id="subagents-tag" class="subagents-tag"></span>
+							<span id="subagents-state" class="state-label subagents-state">Unavailable</span>
+							<button id="subagents-refresh" class="ghost small" type="button">Refresh</button>
+						</div>
+					</header>
+					<p id="subagents-status" class="page-status" role="status">Subagent status is unavailable.</p>
+					<div class="subagents-page-body" role="region" aria-label="Read-only subagent fleet and async runs" tabindex="0">
+						<p class="subagents-note">Inspector = what pi-subagents serves for a run (a structured child session, or a transcript for blocking runs). The artifact tail under View transcript is the raw fallback.</p>
+						<section class="subagents-column" aria-labelledby="subagents-fleet-heading">
+							<h3 id="subagents-fleet-heading" class="column-title">Fleet</h3>
+							<div id="subagents-fleet" class="subagents-list"></div>
+							<p id="subagents-fleet-empty" class="empty">No fleet entries.</p>
+						</section>
+						<section class="subagents-column" aria-labelledby="subagents-async-heading">
+							<h3 id="subagents-async-heading" class="column-title">Async runs</h3>
+							<div id="subagents-async" class="subagents-list"></div>
+							<p id="subagents-async-empty" class="empty">No async runs.</p>
+						</section>
+					</div>
+				</section>
 			</main>
 		</div>
 

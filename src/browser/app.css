@@ -297,6 +297,51 @@ summary::-webkit-details-marker {
 	font-weight: 500;
 }
 
+/* The shell has two pages, and the tab row that switches them stays in the top bar so
+   the way back is always reachable — a hidden page must never hold the only way out. */
+.page-nav {
+	display: flex;
+	align-items: center;
+	min-width: 0;
+}
+
+.page-tabs {
+	display: flex;
+	align-items: center;
+	gap: 2px;
+	padding: 2px;
+	border: 1px solid var(--border-l1);
+	border-radius: var(--radius-pill);
+	background: var(--bg-layer-1);
+}
+
+/* The selected tab is the current page, not a button that happens to be pressed: the
+   label steps up to --text-1 and the pill fills, so the choice reads at a glance. */
+.page-tab {
+	padding: 4px 12px;
+	border-color: transparent;
+	background: transparent;
+	color: var(--text-3);
+	font-size: var(--fs-sm);
+	font-weight: 500;
+}
+
+.page-tab:hover:not(:disabled) {
+	border-color: transparent;
+	background: var(--hover);
+	color: var(--text-1);
+}
+
+.page-tab[aria-selected="true"] {
+	border-color: var(--border-l1);
+	background: var(--bg-layer-2);
+	color: var(--text-1);
+}
+
+.page-tab[aria-selected="true"]:hover:not(:disabled) {
+	background: var(--bg-layer-3);
+}
+
 .topbar-tools {
 	display: flex;
 	align-items: center;
@@ -1302,7 +1347,7 @@ option {
 	font-weight: 600;
 }
 
-.rail-state {
+.state-label {
 	flex: none;
 	color: var(--text-caption);
 	font-size: var(--fs-caption);
@@ -1360,21 +1405,6 @@ option {
 	align-items: center;
 	flex-wrap: wrap;
 	gap: var(--sp-2);
-}
-
-.rail-status {
-	margin: 0;
-	color: var(--text-3);
-	font-size: var(--fs-sm);
-	overflow-wrap: anywhere;
-}
-
-.rail-status[data-state="ok"] {
-	color: var(--ok);
-}
-
-.rail-status[data-state="error"] {
-	color: var(--err);
 }
 
 .rail-note {
@@ -1462,11 +1492,119 @@ option {
 	color: var(--text-caption);
 }
 
+/* --------------------------------------------------------- subagents page -- */
+
+/* The subagents area is a page of its own: a heading row (title, counts, state, refresh),
+   one status line, and a bounded body that scrolls inside the page. Colours, type and
+   surfaces stay the ones the rail used, so the page reads as the same product. */
+
+/* Compact counts beside the page title: one pill, and only while the snapshot carries
+   counts, so a loading/error/unavailable page keeps the room for its state label. */
+.subagents-tag {
+	flex: none;
+	padding: 1px 7px;
+	border-radius: var(--radius-pill);
+	background: var(--bg-layer-3);
+	color: var(--text-2);
+	font-size: var(--fs-caption);
+	font-variant-numeric: tabular-nums;
+	white-space: nowrap;
+}
+
+.subagents-tag:empty {
+	display: none;
+}
+
+.subagents-page {
+	display: flex;
+	flex-direction: column;
+	gap: var(--sp-3);
+	flex: 1 1 auto;
+	min-width: 0;
+	min-height: 0;
+	padding-bottom: var(--sp-5);
+}
+
+.page-head {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: var(--sp-2) var(--sp-3);
+	min-width: 0;
+}
+
+.page-title {
+	flex: 1 1 auto;
+	margin: 0;
+	color: var(--text-1);
+	font-size: var(--fs-lg);
+	font-weight: 600;
+}
+
+.page-tools {
+	display: flex;
+	align-items: center;
+	gap: var(--sp-3);
+	flex: none;
+	min-width: 0;
+}
+
+.page-status {
+	margin: 0;
+	color: var(--text-3);
+	font-size: var(--fs-sm);
+	overflow-wrap: anywhere;
+}
+
+.page-status[data-state="ok"] {
+	color: var(--ok);
+}
+
+.page-status[data-state="error"] {
+	color: var(--err);
+}
+
+/* The page body is the only scroller on this page: an opened inspector or a long child
+   transcript grows inside it instead of stretching the page or the columns beside it.
+   Fleet sits left, async runs (the long ones) get the wider right column. */
+.subagents-page-body {
+	display: grid;
+	grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+	align-content: start;
+	gap: var(--sp-3) var(--sp-4);
+	flex: 1 1 auto;
+	min-width: 0;
+	min-height: 0;
+	padding-right: 2px;
+	overflow-x: hidden;
+	overflow-y: auto;
+	overscroll-behavior: contain;
+}
+
+.subagents-note {
+	grid-column: 1 / -1;
+	margin: 0;
+	color: var(--text-caption);
+	font-size: var(--fs-caption);
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+/* One step above the card meta text, under a hairline: the two sections have to read as
+   sections even when a column holds a single short card. */
+.subagents-page-body .column-title {
+	padding-bottom: var(--sp-1);
+	border-bottom: 1px solid var(--border-l1);
+	color: var(--text-2);
+	font-size: var(--fs-md);
+}
+
 /* ------------------------------------------------------------- subagents -- */
 
 .subagents-column {
 	display: grid;
 	gap: var(--sp-2);
+	align-content: start;
 	min-width: 0;
 }
 
@@ -1608,14 +1746,6 @@ option {
 /* Two distinct read-only views: the structured view is a bounded pane inside the run
    card (it scrolls internally, so it can never cover the chat, the composer or a
    neighbouring card), the transcript stays the raw artifact tail underneath it. */
-.subagent-run-note {
-	margin: var(--sp-1) 0 0;
-	color: var(--text-caption);
-	font-size: var(--fs-caption);
-	white-space: pre-wrap;
-	overflow-wrap: anywhere;
-}
-
 .subagent-inspect {
 	display: grid;
 	gap: var(--sp-2);
@@ -1799,6 +1929,12 @@ option {
 	}
 
 	.rail {
+		overflow: visible;
+	}
+
+	/* The subagents page follows the same rule as the rail: one column, document flow. */
+	.subagents-page-body {
+		grid-template-columns: minmax(0, 1fr);
 		overflow: visible;
 	}
 }

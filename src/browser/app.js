@@ -14,12 +14,17 @@ const MAX_POLL_INTERVAL_MS = 5000;
 
 const elements = {
 	connection: document.getElementById("connection"),
+	pageTabChat: document.getElementById("page-tab-chat"),
+	pageTabSubagents: document.getElementById("page-tab-subagents"),
+	chatPage: document.getElementById("chat-page"),
+	subagentsPage: document.getElementById("subagents-page"),
 	statusState: document.getElementById("status-state"),
 	statusCwd: document.getElementById("status-cwd"),
 	statusBranch: document.getElementById("status-branch"),
 	statusTokens: document.getElementById("status-tokens"),
 	statusContext: document.getElementById("status-context"),
 	subagentsState: document.getElementById("subagents-state"),
+	subagentsTag: document.getElementById("subagents-tag"),
 	subagentsStatus: document.getElementById("subagents-status"),
 	subagentsRefresh: document.getElementById("subagents-refresh"),
 	subagentsFleet: document.getElementById("subagents-fleet"),
@@ -65,6 +70,10 @@ const state = {
 	token: readToken(),
 	revision: -1,
 	generation: null,
+	// The page the reader chose. Nothing but a click (or its keyboard equivalent) changes
+	// it: polls, refreshes and reload generations update data in place, on whatever page
+	// is showing.
+	page: "chat",
 	pollInterval: POLL_INTERVAL_MS,
 	rendered: new Map(),
 	stopped: false,
@@ -114,6 +123,29 @@ function showAuth(message) {
 
 function hideAuth() {
 	elements.auth.classList.add("hidden");
+}
+
+/* The shell has two pages. Only the selected panel is in the layout — the other one is
+   `display: none`, so its controls leave the tab order and the accessibility tree with it
+   — and only the selected tab stays in the tab order: Tab reaches the row once, then the
+   arrow keys (or Home/End) move within it, as the tab pattern expects. */
+const PAGES = [
+	{ name: "chat", tab: elements.pageTabChat, panel: elements.chatPage },
+	{ name: "subagents", tab: elements.pageTabSubagents, panel: elements.subagentsPage },
+];
+
+function selectPage(name, { focusTab = false } = {}) {
+	const target = PAGES.find((page) => page.name === name) ?? PAGES[0];
+	state.page = target.name;
+	for (const page of PAGES) {
+		const active = page === target;
+		page.tab.setAttribute("aria-selected", active ? "true" : "false");
+		page.tab.tabIndex = active ? 0 : -1;
+		page.panel.classList.toggle("hidden", !active);
+		if (active && focusTab && typeof page.tab.focus === "function") {
+			page.tab.focus();
+		}
+	}
 }
 
 async function api(path, options = {}) {
@@ -599,7 +631,7 @@ function inspectFailureText(code, message) {
 	return { detail, line: `${label} (${code || "inspect_failed"}): ${text}` };
 }
 
-const RAIL_INSPECT_KEY_PREFIX = "run:";
+const PAGE_INSPECT_KEY_PREFIX = "run:";
 const CHAT_INSPECT_KEY_PREFIX = "chat:";
 
 function inspectKey(runId, childId, prefix = "run") {
@@ -1028,8 +1060,8 @@ function buildInspectPanel({ runId, childId = null, label, keyPrefix = "run" }) 
 	toggle.type = "button";
 	// One read-only inspector per run: the panel renders whatever pi-subagents can serve for
 	// the run the row named — a structured view for async runs, a text transcript for blocking
-	// (foreground) ones — and the raw artifact transcript stays the rail's separate fallback.
-	toggle.className = "subagent-inspect-toggle primary";
+	// (foreground) ones — and the raw artifact transcript stays the page's separate fallback.
+	toggle.className = "subagent-inspect-toggle ghost small";
 	toggle.setAttribute("aria-controls", panelId);
 	const panel = document.createElement("div");
 	panel.id = panelId;
@@ -1087,7 +1119,7 @@ function renderChildrenList(card, run) {
 	}
 	const details = document.createElement("details");
 	details.className = "subagent-children";
-	// Each poll rebuilds the rail; keep the disclosure the reader opened open.
+	// Each poll rebuilds the page; keep the disclosure the reader opened open.
 	details.open = state.subagentOpenChildren.get(run.id) === true;
 	details.addEventListener("toggle", () => {
 		state.subagentOpenChildren.set(run.id, details.open === true);
@@ -1124,6 +1156,9 @@ function renderAsyncRun(run) {
 	actions.className = "subagent-run-actions";
 	const button = document.createElement("button");
 	button.type = "button";
+	// Both run actions are read-only and secondary: they share one compact pill size so a
+	// page full of runs does not become a wall of buttons.
+	button.className = "ghost small";
 	button.textContent = "View transcript";
 	const result = document.createElement("p");
 	result.className = "subagent-run-meta";
@@ -1133,12 +1168,25 @@ function renderAsyncRun(run) {
 	card.append(actions);
 	// The two views are not alternatives: the inspector renders whatever shape pi-subagents
 	// serves for this run (structured child session for async, transcript for a blocking run),
-	// while the artifact tail below stays the rail's own raw fallback.
-	appendSubagentText(card, "subagent-run-note", "Inspector = what pi-subagents serves for this run (a structured child session, or a transcript for blocking runs). The artifact tail below is the raw fallback.");
+	// while the artifact tail below stays the page's own raw fallback. That explanation lives
+	// once on the page: repeating it inside every run is what used to fill the rail.
 	card.append(buildInspectPanel({ runId: run.id, label: `Read-only inspector for async run ${run.id}` }));
 	renderChildrenList(card, run);
 	renderSummaryList(card, "Result summaries", run.results, "subagent-results");
 	return card;
+}
+
+/** Compact counts for the page heading: one tag, and only when a snapshot state carries counts. */
+function subagentsTagText(snapshot) {
+	if (!snapshot || typeof snapshot !== "object") return "";
+	if (snapshot.state === "ready-data") {
+		const fleetCount = Array.isArray(snapshot.fleet?.entries) ? snapshot.fleet.entries.length : 0;
+		const asyncCount = Array.isArray(snapshot.asyncSnapshot?.runs) ? snapshot.asyncSnapshot.runs.length : 0;
+		return `${fleetCount} fleet · ${asyncCount} async`;
+	}
+	if (snapshot.state === "ready-empty") return "none active";
+	// loading/error/unavailable carry no counts: the state label beside the tag says why.
+	return "";
 }
 
 function subagentsStatusText(snapshot) {
@@ -1179,13 +1227,15 @@ function subagentsStatusText(snapshot) {
 	return ["Unavailable", "unavailable", code === "rpc_unavailable" ? "pi-subagents in-process RPC is unavailable." : `pi-subagents status unavailable (${code}): ${message}`];
 }
 
-/** Render the bounded fleet and async-run DTO projection; refresh is explicit only. */
+/** Render the bounded fleet and async-run DTO projection into the subagents page; refresh is
+ *  explicit only, and nothing here needs the page to be the one on screen. */
 function renderSubagents(snapshot) {
 	state.subagentsSnapshot = snapshot && typeof snapshot === "object" ? snapshot : null;
 	state.subagentsGeneration = state.generation;
 	const [label, stateName, message] = subagentsStatusText(state.subagentsSnapshot);
 	elements.subagentsState.textContent = label;
 	elements.subagentsState.dataset.state = stateName;
+	elements.subagentsTag.textContent = subagentsTagText(state.subagentsSnapshot);
 	elements.subagentsStatus.textContent = message;
 	elements.subagentsStatus.dataset.state = stateName === "error" ? "error" : stateName === "ready" ? "ok" : "";
 	elements.subagentsRefresh.disabled = state.generation === null || state.reloading || state.subagentsRefreshing;
@@ -1193,20 +1243,20 @@ function renderSubagents(snapshot) {
 	clearElement(elements.subagentsAsync);
 	const fleetEntries = Array.isArray(state.subagentsSnapshot?.fleet?.entries) ? state.subagentsSnapshot.fleet.entries : [];
 	const asyncRuns = Array.isArray(state.subagentsSnapshot?.asyncSnapshot?.runs) ? state.subagentsSnapshot.asyncSnapshot.runs : [];
-	// The rail is rebuilt on every snapshot revision: drop the DOM registry of the previous
+	// The page is rebuilt on every snapshot revision: drop the DOM registry of the previous
 	// pass and every cached structured view whose run is gone, so neither can grow unbounded.
-	// Only the rail's own `run:` key space is touched: a chat row owns a `chat:` panel whose
+	// Only the page's own `run:` key space is touched: a chat row owns a `chat:` panel whose
 	// node is *not* rebuilt by this pass, and whose run may legitimately have left the bounded
 	// snapshot, so clearing or pruning it here would strand it on its previous paint.
 	for (const key of [...state.subagentInspectNodes.keys()]) {
-		if (key.startsWith(RAIL_INSPECT_KEY_PREFIX)) state.subagentInspectNodes.delete(key);
+		if (key.startsWith(PAGE_INSPECT_KEY_PREFIX)) state.subagentInspectNodes.delete(key);
 	}
 	const activeRunIds = new Set();
 	for (const run of asyncRuns) {
 		if (run && typeof run.id === "string") activeRunIds.add(run.id);
 	}
 	for (const [key, entry] of [...state.subagentInspects]) {
-		if (key.startsWith(RAIL_INSPECT_KEY_PREFIX) && !activeRunIds.has(entry.runId)) state.subagentInspects.delete(key);
+		if (key.startsWith(PAGE_INSPECT_KEY_PREFIX) && !activeRunIds.has(entry.runId)) state.subagentInspects.delete(key);
 	}
 	for (const runId of [...state.subagentOpenChildren.keys()]) {
 		if (!activeRunIds.has(runId)) state.subagentOpenChildren.delete(runId);
@@ -1612,8 +1662,8 @@ function renderChatBlocks(card, message) {
 	}
 
 	// A pi-subagents tool result names the async run it launched, so the chat row can open the
-	// same structured view the rail offers. The chat scope keeps its own panel state: the rail
-	// panel for the same run must not be repainted by this one.
+	// same structured view the subagents page offers. The chat scope keeps its own panel state:
+	// the page panel for the same run must not be repainted by this one.
 	const runId = typeof message.subagentRunId === "string" ? message.subagentRunId : null;
 	if (runId) {
 		if (!inspectPanel || inspectPanel.dataset.runId !== runId) {
@@ -2136,6 +2186,28 @@ function loop() {
 	});
 }
 
+/* Page switching: a click on a tab, or the tab pattern's own keyboard model (the arrow
+   keys and Home/End select and move focus). Selecting a page never fetches anything —
+   the page only shows data the poll already delivered. */
+for (const [index, page] of PAGES.entries()) {
+	page.tab.addEventListener("click", () => selectPage(page.name));
+	page.tab.addEventListener("keydown", (event) => {
+		const key = event?.key;
+		if (key !== "ArrowLeft" && key !== "ArrowRight" && key !== "Home" && key !== "End") {
+			return;
+		}
+		event.preventDefault();
+		const step = key === "ArrowLeft" ? -1 : key === "ArrowRight" ? 1 : 0;
+		const next =
+			key === "Home" ? 0 : key === "End" ? PAGES.length - 1 : (index + step + PAGES.length) % PAGES.length;
+		selectPage(PAGES[next].name, { focusTab: true });
+	});
+}
+
+// The static markup already starts on Chat; this keeps the module state and the DOM in
+// step, and makes the default explicit for a page whose markup was edited.
+selectPage(state.page);
+
 elements.authForm.addEventListener("submit", (event) => {
 	event.preventDefault();
 	const token = elements.authInput.value.trim();
@@ -2206,6 +2278,7 @@ export {
 	requestReload,
 	refreshSubagents,
 	requestSubagentDetail,
+	selectPage,
 	sendChatMessage,
 	stopChat,
 	renderChat,

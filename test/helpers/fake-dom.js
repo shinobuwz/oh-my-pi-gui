@@ -237,9 +237,13 @@ export class FakeElement {
 		delete this.attributes[String(name)];
 	}
 
-	/** Test helper: dispatch an event and return the handlers' results. */
-	dispatch(type) {
-		const event = { type, preventDefault() {}, stopPropagation() {} };
+	/**
+	 * Test helper: dispatch an event and return the handlers' results. `init` adds fields
+	 * the handler reads (for example `key` for a keyboard event); the event object stays a
+	 * plain record, exactly what the page's own listeners see.
+	 */
+	dispatch(type, init = {}) {
+		const event = { type, preventDefault() {}, stopPropagation() {}, ...init };
 		return (this.listeners.get(type) ?? []).map((handler) => handler(event));
 	}
 

@@ -33,6 +33,8 @@ test("renders bounded fleet/async sections and requests transcript details on de
 	await environment.runNextTimer();
 	const fleet = environment.document.getElementById("subagents-fleet");
 	const asyncRuns = environment.document.getElementById("subagents-async");
+	// The subagents page counts its fleet and async runs in one tag; the details stay below.
+	assert.equal(environment.document.getElementById("subagents-tag").textContent, "1 fleet · 1 async");
 	assert.equal(fleet.children.length, 1);
 	assert.match(fleet.textContent, /opaque-fleet-key/);
 	assert.match(fleet.textContent, /Review <safe>/);
@@ -58,6 +60,8 @@ test("renders bounded fleet/async sections and requests transcript details on de
 	assert.deepEqual(JSON.parse(detailCall.options.body), { generation: 3, id: "real-async-id" });
 	assert.match(asyncRuns.children[0].textContent, /safe transcript/);
 	assert.match(asyncRuns.children[0].querySelector("pre").textContent, /<script>not markup<\/script>/);
+	// The inspector/transcript explanation lives once on the page, not inside every run.
+	assert.equal(asyncRuns.children[0].querySelector(".subagent-run-note"), null);
 	assert.equal(page.state.subagentsSnapshot.state, "ready-data");
 });
 
@@ -119,6 +123,7 @@ test("keeps timeout, RPC error, and omitted data visibly distinct", async () => 
 	await importPage({ bust: `subagents-${++bust}` });
 	await environment.runNextTimer();
 	assert.match(environment.document.getElementById("subagents-status").textContent, /timed out/);
+	assert.equal(environment.document.getElementById("subagents-tag").textContent, "", "an unavailable snapshot reports no counts");
 
 	environment.setSnapshot({
 		revision: 2,
@@ -134,6 +139,70 @@ test("keeps timeout, RPC error, and omitted data visibly distinct", async () => 
 	});
 	await environment.runNextTimer();
 	assert.match(environment.document.getElementById("subagents-status").textContent, /omitted|truncated/);
+	assert.equal(environment.document.getElementById("subagents-tag").textContent, "none active");
+});
+
+/* -------------------------------------------------------------- page wiring -- */
+
+test("refreshes from the page's own control with the current generation", async () => {
+	const environment = createFakeEnvironment({ token: "f".repeat(64) });
+	environment.setSnapshot({
+		revision: 1,
+		generation: 5,
+		pending: [],
+		reloading: false,
+		subagents: { available: true, state: "ready-empty", fleet: { entries: [], omitted: 0 }, asyncSnapshot: { runs: [], omitted: { runs: 0, children: 0, byteLimitExceeded: false } } },
+	});
+	restore = installPageGlobals(environment);
+	await importPage({ bust: `subagents-${++bust}` });
+	await environment.runNextTimer();
+	assert.equal(environment.document.getElementById("subagents-state").textContent, "Ready · empty");
+	assert.equal(environment.document.getElementById("subagents-tag").textContent, "none active");
+
+	// The host answers the refresh with a newer snapshot; the page renders it in place.
+	environment.setSnapshot({
+		revision: 2,
+		generation: 5,
+		pending: [],
+		reloading: false,
+		subagents: {
+			available: true,
+			state: "ready-data",
+			revision: 2,
+			fleet: { entries: [{ key: "fleet-1", agent: "scout", goal: "Review <safe>" }], omitted: 0 },
+			asyncSnapshot: { runs: [], omitted: { runs: 0, children: 0, byteLimitExceeded: false } },
+		},
+	});
+	environment.document.getElementById("subagents-refresh").click();
+	await flushTasks();
+	const call = environment.fetchCalls.find((entry) => entry.path === "/api/subagents/refresh");
+	assert.ok(call, "the page Refresh posts to the subagents refresh route");
+	assert.equal(call.options.method, "POST");
+	assert.deepEqual(JSON.parse(call.options.body), { generation: 5 });
+	assert.equal(environment.document.getElementById("subagents-fleet").children.length, 1);
+	assert.equal(environment.document.getElementById("subagents-tag").textContent, "1 fleet · 0 async");
+});
+
+test("keeps the page in sync while Chat is the visible page", async () => {
+	const { environment, page, inspectCalls } = await bootInspect({ respond: () => inspectOk(SUCCESS_INSPECT) });
+	// Polling fills the hidden page too, so switching to it shows a current snapshot rather
+	// than an empty shell — and the switch itself rebuilds nothing.
+	assert.equal(environment.document.getElementById("subagents-page").classList.contains("hidden"), true);
+	assert.equal(environment.document.getElementById("subagents-state").textContent, "Ready");
+	assert.equal(environment.document.getElementById("subagents-async").children.length, 1);
+
+	const card = runCard(environment);
+	card.querySelector(".subagent-inspect-toggle").click();
+	await flushTasks();
+	environment.document.getElementById("page-tab-subagents").click();
+	assert.equal(environment.document.getElementById("subagents-page").classList.contains("hidden"), false);
+	assert.equal(runCard(environment), card, "switching pages must not rebuild the run card");
+	assert.equal(card.querySelector(".subagent-inspect-panel").classList.contains("hidden"), false);
+
+	environment.document.getElementById("page-tab-chat").click();
+	assert.equal(page.state.page, "chat");
+	assert.equal(card.querySelector(".subagent-inspect-panel").classList.contains("hidden"), false, "the answer survives while Chat is showing");
+	assert.equal(inspectCalls.length, 1);
 });
 
 /* ---------------------------------------------------------------- structured view -- */
@@ -245,7 +314,7 @@ test("sends no structured inspection until the run action is clicked, then rende
 	const toggle = card.querySelector(".subagent-inspect-toggle");
 	const panel = card.querySelector(".subagent-inspect-panel");
 
-	assert.equal(inspectCalls.length, 0, "the rail must not request a structured view while rendering");
+	assert.equal(inspectCalls.length, 0, "rendering the subagents page must not request a structured view");
 	assert.equal(toggle.textContent, "Inspect");
 	assert.equal(toggle.getAttribute("aria-expanded"), "false");
 	assert.equal(panel.classList.contains("hidden"), true, "the panel starts collapsed");
@@ -363,14 +432,14 @@ test("opens the structured view from the chat row of a subagent tool result", as
 	assert.deepEqual(JSON.parse(inspectCalls[0].options.body), { generation: INSPECT_GENERATION, id: "real-async-id" });
 	assert.equal(chatPanel.querySelector(".subagent-inspect-panel").classList.contains("hidden"), false);
 	assert.match(chatPanel.textContent, /structured-probe/);
-	// The chat scope keeps its own panel state: the rail view of the same run is untouched.
+	// The chat scope keeps its own panel state: the page's view of the same run is untouched.
 	assert.equal(environment.document.getElementById("subagents-async").querySelector(".subagent-inspect-panel").classList.contains("hidden"), true);
 });
 
-test("repaints a chat structured view after the next poll rebuilt the rail", async () => {
-	// Regression: the rail clears its DOM registry on every snapshot revision. A chat panel is
-	// not rebuilt by that pass, so clearing the shared registry stranded it on "loading" even
-	// though the host had answered.
+test("repaints a chat structured view after the next poll rebuilt the subagents page", async () => {
+	// Regression: the subagents page clears its DOM registry on every snapshot revision. A
+	// chat panel is not rebuilt by that pass, so clearing the shared registry stranded it on
+	// "loading" even though the host had answered.
 	let release = null;
 	const chatPipeline = {
 		available: true,
@@ -406,17 +475,17 @@ test("repaints a chat structured view after the next poll rebuilt the rail", asy
 	toggle.click();
 	await flushTasks();
 
-	// The next poll rebuilds the rail *and* the finished run leaves the bounded async snapshot,
+	// The next poll rebuilds the page *and* the finished run leaves the bounded async snapshot,
 	// which is exactly the state a chat row survives (its panel is `chat:`-scoped, and the route
 	// accepts the id the chat row reported). Before the fix this prune dropped the answer and the
 	// panel stayed on its loading text forever.
 	environment.setSnapshot({ ...subagentsSnapshot({ revision: 5, runs: [] }), chat: { ...chatPipeline, revision: 3 } });
 	await environment.runNextTimer();
-	// The rail prune owns the `run:` key space only: a finished run leaving the snapshot must
+	// The page prune owns the `run:` key space only: a finished run leaving the snapshot must
 	// not delete the chat panel's state, or its answer would be dropped on arrival.
-	assert.equal(page.state.subagentInspects.has("chat:real-async-id"), true, "the chat entry survives the rail prune");
+	assert.equal(page.state.subagentInspects.has("chat:real-async-id"), true, "the chat entry survives the page prune");
 	assert.equal(page.state.subagentInspectNodes.has("chat:real-async-id"), true, "the chat node stays registered");
-	assert.equal(page.state.subagentInspects.has("run:real-async-id"), false, "the rail entry for the departed run is pruned");
+	assert.equal(page.state.subagentInspects.has("run:real-async-id"), false, "the page entry for the departed run is pruned");
 	release();
 	await flushTasks();
 
@@ -564,7 +633,7 @@ test("offers the structured view only for child nodes that have an id", async ()
 	assert.equal(page.state.subagentInspects.has("run:real-async-id#anonymous step"), false, "no id may be invented for a node without one");
 });
 
-test("keeps an answered structured view when the rail is rebuilt by the next poll", async () => {
+test("keeps an answered structured view when the page is rebuilt by the next poll", async () => {
 	const { environment, inspectCalls } = await bootInspect({ respond: () => inspectOk(SUCCESS_INSPECT) });
 	const first = runCard(environment);
 	first.querySelector(".subagent-inspect-toggle").click();
@@ -574,7 +643,7 @@ test("keeps an answered structured view when the rail is rebuilt by the next pol
 	environment.setSnapshot(subagentsSnapshot({ revision: 9, runs: [{ ...INSPECT_RUN, state: "completed", updatedAt: 1700000002000 }] }));
 	await environment.runNextTimer();
 	const rebuilt = runCard(environment);
-	assert.notEqual(rebuilt, first, "a changed revision rebuilds the rail card");
+	assert.notEqual(rebuilt, first, "a changed revision rebuilds the run card");
 	const toggle = rebuilt.querySelector(".subagent-inspect-toggle");
 	assert.equal(inspectCalls.length, 1, "a poll must never re-request a view the reader already opened");
 	assert.equal(toggle.getAttribute("aria-expanded"), "true");

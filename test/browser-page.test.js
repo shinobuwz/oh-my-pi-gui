@@ -64,7 +64,12 @@ describe("browser page markup contract", () => {
 			'id="status-branch"',
 			'id="status-tokens"',
 			'id="status-context"',
+			'id="page-tab-chat"',
+			'id="page-tab-subagents"',
+			'id="chat-page"',
+			'id="subagents-page"',
 			'id="subagents-heading"',
+			'id="subagents-tag"',
 			'id="subagents-state"',
 			'id="subagents-refresh"',
 			'id="subagents-status"',
@@ -106,10 +111,153 @@ describe("browser page markup contract", () => {
 		for (const gone of ['id="model-apply"', 'id="thinking-apply"', ">Use model<", ">Use thinking level<"]) {
 			assert.equal(indexHtml.includes(gone), false, `index.html must not keep ${gone}`);
 		}
+
+		// Chat and Subagents are two pages of one shell: the tab row in the top bar switches
+		// them, and the subagents area may no longer occupy the chat rail at all.
+		assert.equal(indexHtml.includes('id="subagents-card"'), false, "the subagents rail card is gone");
+		const railBlock = indexHtml.slice(
+			indexHtml.indexOf('<aside class="rail"'),
+			indexHtml.indexOf("</aside>", indexHtml.indexOf('<aside class="rail"')),
+		);
+		assert.notEqual(railBlock.length, 0, "index.html must keep the session rail");
+		for (const token of [
+			'id="subagents-heading"',
+			'id="subagents-tag"',
+			'id="subagents-state"',
+			'id="subagents-refresh"',
+			'id="subagents-status"',
+			'id="subagents-fleet"',
+			'id="subagents-async"',
+		]) {
+			assert.equal(railBlock.includes(token), false, `the chat rail must not render ${token}`);
+		}
+
+		// The tab row is the only way in and out, so its contract is explicit: tablist + tabs
+		// with aria-selected and aria-controls, panels with role=tabpanel and a label.
+		assert.match(indexHtml, /<div class="page-tabs" role="tablist" aria-label="Pages">/);
+		const chatTab = /<button id="page-tab-chat"[^>]*>/.exec(indexHtml)?.[0] ?? "";
+		assert.match(chatTab, /role="tab"/);
+		assert.match(chatTab, /aria-selected="true"/, "Chat is the default page");
+		assert.match(chatTab, /aria-controls="chat-page"/);
+		const subagentsTab = /<button id="page-tab-subagents"[^>]*>/.exec(indexHtml)?.[0] ?? "";
+		assert.match(subagentsTab, /role="tab"/);
+		assert.match(subagentsTab, /aria-selected="false"/);
+		assert.match(subagentsTab, /aria-controls="subagents-page"/);
+		assert.match(subagentsTab, /tabindex="-1"/, "only the selected tab stays in the tab order");
+
+		const chatPanel = /<div id="chat-page"[^>]*>/.exec(indexHtml)?.[0] ?? "";
+		assert.match(chatPanel, /role="tabpanel"/);
+		assert.match(chatPanel, /aria-labelledby="page-tab-chat"/);
+		const subagentsPanel = /<section id="subagents-page"[^>]*>/.exec(indexHtml)?.[0] ?? "";
+		assert.match(subagentsPanel, /role="tabpanel"/);
+		assert.match(subagentsPanel, /aria-labelledby="page-tab-subagents"/);
+		assert.match(subagentsPanel, /class="[^"]*hidden/, "the subagents page starts hidden: Chat is the default");
+		assert.equal(/hidden/.test(chatPanel), false, "the chat page must not start hidden");
+
+		// The page owns the whole subagents area: heading, counts, state, refresh, status and
+		// both sections; and one bounded scroll body wraps the long content.
+		const pageBlock = indexHtml.slice(indexHtml.indexOf('id="subagents-page"'), indexHtml.indexOf("</main>", indexHtml.indexOf('id="subagents-page"')));
+		for (const token of [
+			'id="subagents-heading"',
+			'id="subagents-tag"',
+			'id="subagents-state"',
+			'id="subagents-refresh"',
+			'id="subagents-status"',
+			'id="subagents-fleet"',
+			'id="subagents-async"',
+			"class=\"column-title\">Fleet<",
+			"class=\"column-title\">Async runs<",
+		]) {
+			assert.equal(pageBlock.includes(token), true, `the subagents page must own ${token}`);
+		}
+		const bodyIndex = pageBlock.indexOf('class="subagents-page-body"');
+		assert.notEqual(bodyIndex, -1, "the page content needs one bounded scroll body");
+		for (const token of ['id="subagents-fleet"', 'id="subagents-async"']) {
+			assert.equal(pageBlock.indexOf(token) > bodyIndex, true, `${token} must sit inside the page body`);
+		}
 	});
 });
 
 describe("browser page behaviour", () => {
+	it("shows one page at a time and keeps the reader's page across every poll", async () => {
+		const { environment, page } = await boot();
+		const chatTab = environment.document.getElementById("page-tab-chat");
+		const subagentsTab = environment.document.getElementById("page-tab-subagents");
+		const chatPage = environment.document.getElementById("chat-page");
+		const subagentsPage = environment.document.getElementById("subagents-page");
+
+		// Chat is the default: the subagents area must not compete with the transcript.
+		assert.equal(page.state.page, "chat");
+		assert.equal(chatPage.classList.contains("hidden"), false);
+		assert.equal(subagentsPage.classList.contains("hidden"), true);
+		assert.equal(chatTab.getAttribute("aria-selected"), "true");
+		assert.equal(subagentsTab.getAttribute("aria-selected"), "false");
+		assert.equal(chatTab.tabIndex, 0);
+		assert.equal(subagentsTab.tabIndex, -1);
+
+		const callsBefore = environment.fetchCalls.length;
+		subagentsTab.click();
+		assert.equal(page.state.page, "subagents");
+		assert.equal(subagentsPage.classList.contains("hidden"), false, "the subagents page takes the workspace");
+		assert.equal(chatPage.classList.contains("hidden"), true, "the chat and its rail leave the workspace");
+		assert.equal(subagentsTab.getAttribute("aria-selected"), "true");
+		assert.equal(chatTab.getAttribute("aria-selected"), "false");
+		assert.equal(chatTab.tabIndex, -1);
+		assert.equal(subagentsTab.tabIndex, 0);
+		assert.equal(
+			environment.fetchCalls.length,
+			callsBefore,
+			"switching pages must not request anything: the page only shows what the poll delivered",
+		);
+
+		// A poll, a refresh, or a reload's new generation all update data in place: none of
+		// them may yank the reader back to Chat.
+		environment.setSnapshot({ revision: 2, pending: [], generation: 1, reloading: false });
+		await environment.runNextTimer();
+		assert.equal(subagentsPage.classList.contains("hidden"), false, "a poll must not change the page");
+		environment.setSnapshot({ revision: 3, pending: [], generation: 2, reloading: false });
+		await environment.runNextTimer();
+		assert.equal(subagentsPage.classList.contains("hidden"), false, "a new generation must not change the page");
+		assert.equal(environment.document.getElementById("page-tab-subagents").getAttribute("aria-selected"), "true");
+
+		chatTab.click();
+		assert.equal(page.state.page, "chat");
+		assert.equal(chatPage.classList.contains("hidden"), false);
+		assert.equal(subagentsPage.classList.contains("hidden"), true);
+		assert.equal(chatTab.getAttribute("aria-selected"), "true");
+	});
+
+	it("switches pages from the keyboard with the tab row's roving focus", async () => {
+		const { environment } = await boot();
+		const chatTab = environment.document.getElementById("page-tab-chat");
+		const subagentsTab = environment.document.getElementById("page-tab-subagents");
+		const chatPage = environment.document.getElementById("chat-page");
+		const subagentsPage = environment.document.getElementById("subagents-page");
+
+		chatTab.dispatch("keydown", { key: "Tab" });
+		assert.equal(chatPage.classList.contains("hidden"), false, "an unrelated key must not switch pages");
+		assert.equal(subagentsTab.getAttribute("aria-selected"), "false");
+
+		chatTab.dispatch("keydown", { key: "ArrowRight" });
+		assert.equal(subagentsPage.classList.contains("hidden"), false);
+		assert.equal(subagentsTab.getAttribute("aria-selected"), "true");
+		assert.equal(subagentsTab.tabIndex, 0, "the selected tab is the one Tab reaches");
+		assert.equal(chatTab.tabIndex, -1);
+
+		subagentsTab.dispatch("keydown", { key: "ArrowLeft" });
+		assert.equal(chatPage.classList.contains("hidden"), false);
+		assert.equal(chatTab.getAttribute("aria-selected"), "true");
+
+		// Two tabs, one row: the edges wrap, and Home/End pick an end directly.
+		chatTab.dispatch("keydown", { key: "ArrowLeft" });
+		assert.equal(subagentsPage.classList.contains("hidden"), false, "ArrowLeft on the first tab wraps to the last");
+		subagentsTab.dispatch("keydown", { key: "Home" });
+		assert.equal(chatPage.classList.contains("hidden"), false);
+		chatTab.dispatch("keydown", { key: "End" });
+		assert.equal(subagentsPage.classList.contains("hidden"), false);
+		assert.equal(environment.document.getElementById("page-tab-subagents").tabIndex, 0);
+	});
+
 	it("renders compact status values safely and keeps missing values explicitly unknown", async () => {
 		const { environment } = await boot();
 		environment.setSnapshot({
