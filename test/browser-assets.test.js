@@ -39,8 +39,10 @@ describe("browser page security guards", () => {
 		const combined = `${appJs}\n${indexHtml}\n${appCss}`;
 		assert.equal(/https?:\/\/(?!127\.0\.0\.1)/.test(combined), false, "no external origins may be referenced");
 		assert.equal(combined.includes("cdn"), false);
-		assert.equal(indexHtml.includes('<script src="/app.js"'), true);
-		assert.equal(indexHtml.includes('<link rel="stylesheet" href="/app.css"'), true);
+		assert.match(indexHtml, /<script type="module" src="\.?\/app\.js">/);
+		assert.match(indexHtml, /<link rel="stylesheet" href="\.?\/app\.css"/);
+		assert.equal(indexHtml.includes("http://"), false);
+		assert.equal(indexHtml.includes("https://"), false);
 	});
 
 	it("uses the URL fragment token and an Authorization header", () => {

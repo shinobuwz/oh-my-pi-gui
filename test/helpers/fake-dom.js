@@ -159,6 +159,21 @@ export class FakeElement {
 		}
 	}
 
+	get isConnected() {
+		return this.parent !== null;
+	}
+
+	replaceChildren(...nodes) {
+		const keep = new Set(nodes);
+		for (const child of [...this.children]) {
+			if (!keep.has(child)) {
+				child.parent = null;
+			}
+		}
+		this.children = [];
+		this.append(...nodes);
+	}
+
 	cloneNode() {
 		const copy = new FakeElement(this.tagName);
 		copy.attributes = { ...this.attributes };

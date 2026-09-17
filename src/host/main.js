@@ -12,10 +12,12 @@
  * exits non-zero without publishing a URL.
  */
 
-import { resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { DEFAULT_URL_FILE, HostStartupError, startHost } from "./host.js";
+import { ensureBrowserUi } from "./ensure-ui-build.js";
+import { BUILT_ASSETS_DIR, DEFAULT_ASSETS_DIR, DEFAULT_URL_FILE, HostStartupError, startHost } from "./host.js";
 import { HOST_PACKAGE_NAME, PACKAGE_ROOT_ENV, SDK_PATH_ENV } from "./sdk-loader.js";
 import { UI_SUPPORT_SUMMARY } from "./ui-context.js";
 
@@ -123,8 +125,18 @@ export async function runCli({
 	const cwd = args.cwd ? resolve(cwdBase, args.cwd) : cwdBase;
 	const urlFile = args.urlFile ? resolve(cwdBase, args.urlFile) : resolve(cwdBase, DEFAULT_URL_FILE);
 	const logger = (message) => stderr.write(`[pi-gui] ${message}\n`);
+	if (start === startHost && env.PI_GUI_SKIP_UI_BUILD !== "1") {
+		try {
+			await ensureBrowserUi({ logger });
+		} catch (error) {
+			stderr.write(`pi-gui: browser UI build failed: ${error instanceof Error ? error.message : String(error)}\n`);
+			return { code: 1, error };
+		}
+	}
+	const builtIndex = join(BUILT_ASSETS_DIR, "index.html");
+	const assetsDir = existsSync(builtIndex) ? BUILT_ASSETS_DIR : DEFAULT_ASSETS_DIR;
 	try {
-		const host = await start({ cwd, urlFile, env, logger, print: (line) => stdout.write(`${line}\n`) });
+		const host = await start({ cwd, urlFile, env, logger, print: (line) => stdout.write(`${line}\n`), assetsDir });
 		return { code: 0, host, url: host.url, cwd, urlFile };
 	} catch (error) {
 		stderr.write(`pi-gui: ${formatStartupFailure(error)}\n`);

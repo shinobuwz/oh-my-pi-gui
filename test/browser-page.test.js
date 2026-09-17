@@ -93,14 +93,18 @@ describe("browser page markup contract", () => {
 			'id="model-current"',
 			'id="model-form"',
 			'id="model-select"',
-			'id="model-apply"',
 			'id="model-status"',
 			'id="thinking-form"',
 			'id="thinking-select"',
-			'id="thinking-apply"',
 			'id="thinking-status"',
 		]) {
 			assert.equal(indexHtml.includes(token), true, `index.html must keep ${token}`);
+		}
+
+		// Picking a value in either select applies it; the old second-confirmation
+		// buttons must not come back behind a live select.
+		for (const gone of ['id="model-apply"', 'id="thinking-apply"', ">Use model<", ">Use thinking level<"]) {
+			assert.equal(indexHtml.includes(gone), false, `index.html must not keep ${gone}`);
 		}
 	});
 });
@@ -171,6 +175,31 @@ describe("browser page behaviour", () => {
 		assert.equal(history.children.length, 2, "finalized stream reconciliation must not duplicate chat rows");
 		assert.equal(history.children[1].querySelector(".chat-text").textContent, "complete");
 		assert.equal(history.scrollTop, 17, "stream updates must not force-scroll a reader reviewing earlier history");
+	});
+
+	it("finalizes markdown streaming when the turn goes idle without a new message revision", async () => {
+		const assistant = { id: "live-assistant", role: "assistant", revision: 7, text: "$E = mc^2$" };
+		const { environment } = await boot({ session: undefined });
+		environment.setSnapshot({
+			revision: 2,
+			pending: [],
+			generation: 1,
+			reloading: false,
+			chat: { available: true, phase: "streaming", revision: 7, messages: [assistant] },
+		});
+		await environment.runNextTimer();
+		const history = environment.document.getElementById("chat-history");
+		assert.equal(history.children[0].dataset.markdownStreaming, "1");
+
+		environment.setSnapshot({
+			revision: 3,
+			pending: [],
+			generation: 1,
+			reloading: false,
+			chat: { available: true, phase: "idle", revision: 8, messages: [assistant] },
+		});
+		await environment.runNextTimer();
+		assert.equal(history.children[0].dataset.markdownStreaming, "0", "idle must settle TeX even when the row revision is unchanged");
 	});
 
 	it("requests a fresh full chat snapshot after a generation change", async () => {

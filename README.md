@@ -27,8 +27,9 @@ logic migrated into `src/core/`: `chat-messages.js`, `model-catalog.js`, `git-st
 ## Start
 
 ```bash
-npm start                          # session cwd = this directory, URL file = .browser-ui/url
+npm start                          # first run builds the browser UI; later starts reuse dist/browser
 npm start -- --cwd <dir> --url-file <path>
+npm run build:ui                   # rebuild after editing src/browser (output: dist/browser)
 node src/host/main.js --help       # usage and the SDK resolution order
 ```
 
@@ -293,9 +294,9 @@ delays startup.
 - The read-only Session status panel shows cwd, Git branch, session token totals and context
   usage. Git refreshes are asynchronous and bounded; non-repository, unavailable or failing
   Git is shown as Unknown rather than exposing command errors.
-- The Current model and thinking panel uses explicit **Use model** and **Use thinking level**
-  submissions. It displays the host's effective state after each request, including a
-  `setModel()` authentication failure or thinking-level clamp.
+- The Current model and thinking panel applies a pick as soon as the select changes. It
+  displays the host's effective state after each request, including a `setModel()`
+  authentication failure or thinking-level clamp.
 - The Subagents panel keeps opaque fleet display keys separate from real async run ids.
   Refresh is manual; **View transcript** is on-demand and sends only the current generation,
   run id, `view: "transcript"` and the fixed server-side line limit. Unavailable, timeout,

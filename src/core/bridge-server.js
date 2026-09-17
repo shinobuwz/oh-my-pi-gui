@@ -7,7 +7,7 @@
  * - binds 127.0.0.1 only, on an ephemeral port
  * - unpredictable per-session bearer token, exact Host and Origin validation
  * - rejects cross-site writes, limits request size, validates every value
- * - serves only three allow-listed local assets, no CDN, no file reads by path
+ * - serves allow-listed local assets (classic page files plus hashed Vite `/assets/*`), no CDN, no path traversal
  * - no long-lived resources are created here; the caller owns start/stop
  */
 
@@ -156,22 +156,87 @@ export const ASSET_ROUTES = Object.freeze({
 	"/app.css": "app.css",
 });
 
+const BUILT_ASSET_EXT = new Set([".js", ".css", ".woff", ".woff2", ".ttf"]);
+
+function isBuiltAssetSegment(part) {
+	if (typeof part !== "string" || part.length === 0) {
+		return false;
+	}
+	for (let i = 0; i < part.length; i += 1) {
+		const code = part.charCodeAt(i);
+		const ok = (code >= 48 && code <= 57)
+			|| (code >= 65 && code <= 90)
+			|| (code >= 97 && code <= 122)
+			|| code === 45
+			|| code === 46
+			|| code === 95;
+		if (!ok) {
+			return false;
+		}
+	}
+	return true;
+}
+
 const CONTENT_TYPES = Object.freeze({
 	".html": "text/html; charset=utf-8",
 	".js": "text/javascript; charset=utf-8",
 	".css": "text/css; charset=utf-8",
+	".woff": "font/woff",
+	".woff2": "font/woff2",
+	".ttf": "font/ttf",
 });
 
 const CSP = [
 	"default-src 'none'",
 	"script-src 'self'",
 	"style-src 'self'",
+	"font-src 'self'",
 	"connect-src 'self'",
 	"img-src 'none'",
 	"base-uri 'none'",
 	"form-action 'none'",
 	"frame-ancestors 'none'",
 ].join("; ");
+
+/**
+ * Map a request path to a file relative to `assetsDir`, or null if it is not serveable.
+ * Classic three-file routes stay exact; Vite hashed files are `/assets/<name>` or one nested folder.
+ */
+export function resolvePublicAsset(pathname) {
+	if (typeof pathname !== "string" || pathname.includes("\0")) {
+		return null;
+	}
+	const classic = ASSET_ROUTES[pathname];
+	if (classic) {
+		return { relative: classic, ext: extname(classic) };
+	}
+	let decoded = pathname;
+	try {
+		decoded = decodeURIComponent(pathname);
+	} catch {
+		return null;
+	}
+	if (decoded.includes("\0") || decoded.includes("..") || decoded.includes("\\")) {
+		return null;
+	}
+	if (!decoded.startsWith("/assets/")) {
+		return null;
+	}
+	const parts = decoded.slice(1).split("/");
+	if (parts[0] !== "assets" || parts.length < 2 || parts.length > 3) {
+		return null;
+	}
+	for (const part of parts) {
+		if (!isBuiltAssetSegment(part)) {
+			return null;
+		}
+	}
+	const ext = extname(parts[parts.length - 1]).toLowerCase();
+	if (!BUILT_ASSET_EXT.has(ext)) {
+		return null;
+	}
+	return { relative: parts.join("/"), ext };
+}
 
 const SECURITY_HEADERS = Object.freeze({
 	"Cache-Control": "no-store",
@@ -346,7 +411,7 @@ function closeBridgeServer(server) {
  *
  * @param {object} options
  * @param {import("./request-store.js").RequestStore} options.store
- * @param {string} options.assetsDir directory holding index.html/app.js/app.css
+ * @param {string} options.assetsDir directory holding the classic page files and/or a Vite `assets/` folder
  * @param {string} [options.token]
  * @param {{ snapshot: () => { generation: number, reloading: boolean }, reload: () => Promise<{ ok: boolean, status?: number, code?: string, message?: string, generation?: number }>, sessionSnapshot?: (options?: { chatSince?: number }) => object | null, sessionMessage?: (generation: number, body: object) => Promise<{ ok: boolean, status?: number, code?: string, message?: string, [key: string]: unknown }>, sessionStop?: (generation: number, body: object) => Promise<{ ok: boolean, status?: number, code?: string, message?: string, [key: string]: unknown }>, sessionModel?: (generation: number, body: object) => Promise<{ ok: boolean, status?: number, code?: string, message?: string, [key: string]: unknown }>, sessionThinking?: (generation: number, body: object) => Promise<{ ok: boolean, status?: number, code?: string, message?: string, [key: string]: unknown }>, sessionSubagentsDetails?: (generation: number, body: object) => Promise<{ ok: boolean, status?: number, code?: string, message?: string, [key: string]: unknown }>, sessionSubagentsInspect?: (generation: number, body: object) => Promise<{ ok: boolean, status?: number, code?: string, message?: string, [key: string]: unknown }>, sessionSubagentsRefresh?: (generation: number, body: object) => Promise<{ ok: boolean, status?: number, code?: string, message?: string, [key: string]: unknown }> }} [options.control]
  * @param {(handler: (req: import("node:http").IncomingMessage, res: import("node:http").ServerResponse) => void) => import("node:http").Server} [options.createServer] injectable server factory for binding tests
@@ -690,7 +755,7 @@ export async function startBridgeServer({
 			return;
 		}
 
-		const asset = ASSET_ROUTES[pathname];
+		const asset = resolvePublicAsset(pathname);
 		if (!asset) {
 			sendError(res, 404, "not_found", "not found");
 			return;
@@ -701,14 +766,14 @@ export async function startBridgeServer({
 		}
 		let content;
 		try {
-			content = await readFile(join(assetsDir, asset));
+			content = await readFile(join(assetsDir, asset.relative));
 		} catch {
 			sendError(res, 404, "not_found", "asset missing on disk");
 			return;
 		}
 		res.writeHead(200, {
 			...SECURITY_HEADERS,
-			"Content-Type": CONTENT_TYPES[extname(asset)] ?? "application/octet-stream",
+			"Content-Type": CONTENT_TYPES[asset.ext] ?? "application/octet-stream",
 			"Content-Length": content.length,
 		});
 		if (req.method === "HEAD") {

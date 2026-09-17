@@ -5,110 +5,105 @@
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
 		<meta name="referrer" content="no-referrer" />
 		<title>Pi session browser UI</title>
-		<link rel="stylesheet" href="/app.css" />
+		<link rel="stylesheet" href="./app.css" />
 	</head>
-	<body>
+	<body data-ds-dark-theme>
 		<div class="app">
 			<header class="topbar">
-				<h1 class="topbar-title">
-					<span class="mark">pi</span>
-					<span class="topbar-name">session browser</span>
-					<span class="tag">prototype</span>
-				</h1>
-				<p id="connection" class="connection" data-state="connecting">Connecting…</p>
-				<form id="reload-form" class="reload-bar">
-					<button id="reload-button" type="submit">Reload session</button>
-					<span id="reload-state" class="reload-state"></span>
-				</form>
+				<div class="brand">
+					<span class="mark" aria-hidden="true">pi</span>
+					<h1 class="topbar-title">
+						<span class="topbar-name">Session browser</span>
+						<span class="tag">prototype</span>
+					</h1>
+				</div>
+				<div class="topbar-tools">
+					<p id="connection" class="connection" data-state="connecting">Connecting…</p>
+					<form id="reload-form" class="reload-bar">
+						<button id="reload-button" class="ghost" type="submit">Reload session</button>
+						<span id="reload-state" class="reload-state"></span>
+					</form>
+				</div>
 			</header>
 
-			<p class="lead">Answers are sent only when you submit them. Nothing is auto-approved.</p>
-
-			<details class="notes">
-				<summary>Notes</summary>
-				<ul>
-					<li>Losing this page does not confirm anything by itself. Reopen the session URL if this tab is closed.</li>
-					<li>
-						Reloading restarts extensions inside the same Pi process. This page keeps its URL and token, reconnects to the new
-						binding automatically and refuses answers that belong to the previous generation.
-					</li>
-					<li>Busy normal sends are rejected; queued modes are accepted separately from execution.</li>
-				</ul>
-			</details>
-
 			<main class="layout">
-				<section id="auth" class="panel hidden">
+				<section id="auth" class="auth hidden">
 					<h2 class="micro">Access token required</h2>
 					<p id="auth-message" class="lead">Open the browser URL of the running Pi session.</p>
 					<form id="auth-form" class="auth-form" autocomplete="off">
 						<label class="field-label" for="auth-token">Token from the URL fragment (<code>#t=…</code>)</label>
 						<div class="controls-row">
 							<span class="input"><input id="auth-token" name="token" type="password" spellcheck="false" autocomplete="off" /></span>
-							<button type="submit">Use token</button>
+							<button class="primary" type="submit">Use token</button>
 						</div>
 					</form>
 				</section>
 
-				<section class="prompts" aria-labelledby="prompts-heading">
-					<div class="micro-head">
-						<h2 id="prompts-heading" class="micro">Prompts</h2>
-						<span class="micro-note">explicit answers only</span>
-					</div>
-					<div id="requests"></div>
-					<p id="empty" class="empty">No pending prompts.</p>
-				</section>
-
 				<div class="workspace">
 					<section class="chat" aria-labelledby="chat-heading">
-						<div class="micro-head">
-							<h2 id="chat-heading" class="micro">Chat</h2>
-							<span id="chat-phase" class="chat-phase">Unavailable</span>
-						</div>
+						<h2 id="chat-heading" class="sr-only">Chat</h2>
+
+						<section class="prompts" aria-labelledby="prompts-heading">
+							<div class="micro-head">
+								<h2 id="prompts-heading" class="micro">Needs an answer</h2>
+								<span class="micro-note">explicit answers only</span>
+							</div>
+							<div id="requests"></div>
+							<p id="empty" class="empty">No pending prompts.</p>
+						</section>
+
 						<div id="chat-history" class="chat-history" aria-live="polite">
 							<p id="chat-empty" class="empty">No chat messages yet.</p>
 						</div>
+
 						<div class="composer">
 							<form id="chat-form" class="composer-form">
 								<label class="sr-only" for="chat-input">Message</label>
 								<textarea id="chat-input" name="message" rows="3" maxlength="65536" placeholder="Ask the current Pi session…"></textarea>
 							</form>
 							<div class="composer-foot">
-								<details id="model-chip" class="chip">
-									<summary class="chip-toggle">
-										<span id="model-current" class="chip-model">Current model: unavailable</span>
-										<span id="controls-state" class="controls-state">Unavailable</span>
-									</summary>
-									<div class="chip-body">
-										<h2 id="controls-heading" class="micro">Model and thinking</h2>
-										<form id="model-form" class="controls-form">
-											<label class="field-label" for="model-select">Model candidate</label>
-											<div class="controls-row">
-												<span class="select"><select id="model-select" name="model" disabled></select></span>
-												<button id="model-apply" class="primary" type="submit" disabled>Use model</button>
-											</div>
-											<p id="model-status" class="controls-status" role="status"></p>
-										</form>
-										<form id="thinking-form" class="controls-form">
-											<label class="field-label" for="thinking-select">Thinking level</label>
-											<div class="controls-row">
-												<span class="select"><select id="thinking-select" name="thinking" disabled></select></span>
-												<button id="thinking-apply" class="primary" type="submit" disabled>Use thinking level</button>
-											</div>
-											<p id="thinking-status" class="controls-status" role="status"></p>
-										</form>
-										<p class="hint">Changes use the current session only. The host may clamp thinking; accepted controls never claim a turn finished.</p>
-									</div>
-								</details>
-								<span class="select select-flat">
-									<select id="chat-delivery" name="delivery" form="chat-form">
-										<option value="normal">Normal (idle only)</option>
-										<option value="steer">Steer (during response)</option>
-										<option value="followUp">Follow-up (after response)</option>
-									</select>
-								</span>
+								<div class="composer-tools">
+									<span id="chat-phase" class="pill chat-phase">Unavailable</span>
+									<details id="model-chip" class="chip">
+										<summary class="chip-toggle">
+											<span id="model-current" class="chip-model">Current model: unavailable</span>
+											<span id="controls-state" class="controls-state">Unavailable</span>
+										</summary>
+										<div class="chip-body">
+											<h2 id="controls-heading" class="micro">Model and thinking</h2>
+											<!-- Picking a value applies it right away: there is no second
+											     confirmation button. Each form only groups label, field and
+											     status for the select's `change` handler. -->
+											<form id="model-form" class="controls-form">
+												<label class="field-label" for="model-select">Model candidate</label>
+												<div class="controls-row">
+													<span class="select"><select id="model-select" name="model" disabled></select></span>
+												</div>
+												<p id="model-status" class="controls-status" role="status"></p>
+											</form>
+											<form id="thinking-form" class="controls-form">
+												<label class="field-label" for="thinking-select">Thinking level</label>
+												<div class="controls-row">
+													<span class="select"><select id="thinking-select" name="thinking" disabled></select></span>
+												</div>
+												<p id="thinking-status" class="controls-status" role="status"></p>
+											</form>
+											<p class="hint">Changes use the current session only. The host may clamp thinking; accepted controls never claim a turn finished.</p>
+										</div>
+									</details>
+									<span class="select select-flat">
+										<select id="chat-delivery" name="delivery" form="chat-form">
+											<option value="normal">Normal (idle only)</option>
+											<option value="steer">Steer (during response)</option>
+											<option value="followUp">Follow-up (after response)</option>
+										</select>
+									</span>
+								</div>
 								<div class="composer-actions">
-									<button id="chat-stop" type="button">Stop</button>
-									<button id="chat-send" class="primary" type="submit" form="chat-form">Send</button>
+									<button id="chat-stop" class="ghost" type="button">Stop</button>
+									<button id="chat-send" class="primary send" type="submit" form="chat-form" aria-label="Send message" title="Send message">
+										<span class="send-icon" aria-hidden="true"></span>
+									</button>
 								</div>
 							</div>
 						</div>
@@ -116,18 +111,18 @@
 					</section>
 
 					<aside class="rail" aria-label="Session details">
-						<details class="rail-card" aria-labelledby="status-heading">
+						<details class="rail-card" open>
 							<summary class="rail-head">
-								<h2 id="status-heading" class="micro">Session status</h2>
-								<span id="status-state" class="status-state">Unavailable</span>
-								<span class="rail-line">
+								<h2 id="status-heading" class="rail-title">Session</h2>
+								<span id="status-state" class="rail-state status-state">Unavailable</span>
+							</summary>
+							<div class="rail-body">
+								<div class="rail-line">
 									<span class="sr-only">Git branch</span>
 									<span id="status-branch" class="rail-value">Unknown</span>
 									<span class="sr-only">Context</span>
 									<span id="status-context" class="rail-value">tokens Unknown · window Unknown · usage Unknown</span>
-								</span>
-							</summary>
-							<div class="rail-body">
+								</div>
 								<dl class="session-status">
 									<div>
 										<dt>CWD</dt>
@@ -141,30 +136,43 @@
 							</div>
 						</details>
 
-						<details class="rail-card" aria-labelledby="subagents-heading">
+						<details class="rail-card" open>
 							<summary class="rail-head">
-								<h2 id="subagents-heading" class="micro">Subagents</h2>
-								<span id="subagents-state" class="subagents-state">Unavailable</span>
-								<span id="subagents-status" class="subagents-status" role="status">Subagent status is unavailable.</span>
+								<h2 id="subagents-heading" class="rail-title">Subagents</h2>
+								<span id="subagents-state" class="rail-state subagents-state">Unavailable</span>
 							</summary>
 							<div class="rail-body">
+								<p id="subagents-status" class="rail-status" role="status">Subagent status is unavailable.</p>
 								<div class="rail-actions">
-									<button id="subagents-refresh" type="button">Refresh</button>
+									<button id="subagents-refresh" class="ghost small" type="button">Refresh</button>
 								</div>
-								<div class="subagents-columns">
-									<section class="subagents-column" aria-labelledby="subagents-fleet-heading">
-										<h3 id="subagents-fleet-heading" class="column-title">Fleet</h3>
-										<div id="subagents-fleet" class="subagents-list"></div>
-										<p id="subagents-fleet-empty" class="empty">No fleet entries.</p>
-									</section>
-									<section class="subagents-column" aria-labelledby="subagents-async-heading">
-										<h3 id="subagents-async-heading" class="column-title">Async runs</h3>
-										<div id="subagents-async" class="subagents-list"></div>
-										<p id="subagents-async-empty" class="empty">No async runs.</p>
-									</section>
-								</div>
+								<section class="subagents-column" aria-labelledby="subagents-fleet-heading">
+									<h3 id="subagents-fleet-heading" class="column-title">Fleet</h3>
+									<div id="subagents-fleet" class="subagents-list"></div>
+									<p id="subagents-fleet-empty" class="empty">No fleet entries.</p>
+								</section>
+								<section class="subagents-column" aria-labelledby="subagents-async-heading">
+									<h3 id="subagents-async-heading" class="column-title">Async runs</h3>
+									<div id="subagents-async" class="subagents-list"></div>
+									<p id="subagents-async-empty" class="empty">No async runs.</p>
+								</section>
 							</div>
 						</details>
+
+						<section class="rail-note">
+							<p class="lead">Answers are sent only when you submit them. Nothing is auto-approved.</p>
+							<details class="notes">
+								<summary>Notes</summary>
+								<ul>
+									<li>Losing this page does not confirm anything by itself. Reopen the session URL if this tab is closed.</li>
+									<li>
+										Reloading restarts extensions inside the same Pi process. This page keeps its URL and token, reconnects to the new
+										binding automatically and refuses answers that belong to the previous generation.
+									</li>
+									<li>Busy normal sends are rejected; queued modes are accepted separately from execution.</li>
+								</ul>
+							</details>
+						</section>
 					</aside>
 				</div>
 			</main>
@@ -183,6 +191,6 @@
 			</article>
 		</template>
 
-		<script src="/app.js" type="module"></script>
+		<script type="module" src="./app.js"></script>
 	</body>
 </html>

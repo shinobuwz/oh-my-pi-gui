@@ -26,8 +26,10 @@ import { HostSubagentsBridge, openSubagentsChannel } from "./subagents.js";
 export const EXTRA_EXTENSIONS_ENV = "PI_GUI_EXTRA_EXTENSIONS";
 import { createBrowserUIContext } from "./ui-context.js";
 
-/** Static assets served by the bridge. */
+/** Unbundled page sources; tests and the no-build fallback serve these directly. */
 export const DEFAULT_ASSETS_DIR = fileURLToPath(new URL("../browser/", import.meta.url));
+/** Vite output served by `npm start` after `vite build`. */
+export const BUILT_ASSETS_DIR = fileURLToPath(new URL("../../dist/browser/", import.meta.url));
 /** Default URL file, relative to the invoker's working directory. */
 export const DEFAULT_URL_FILE = ".browser-ui/url";
 /** Single binding generation: the GUI owns one session per process and never rebinds in place. */

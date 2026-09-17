@@ -1,8 +1,9 @@
 /**
  * Browser client for the Pi browser-interaction prototype.
  *
- * Vanilla ES module, no dependencies, no CDN. All values coming from the host are
- * rendered with textContent (never innerHTML) so prompt text is displayed as text.
+ * Vanilla ES module for host chrome. Assistant text mounts a React markdown island
+ * (dsh MarkdownText) when the Vite build is present; otherwise it stays textContent.
+ * Prompt cards and tool/thinking blocks always use textContent (never innerHTML).
  * The token is read from the URL fragment (#t=…) and kept in sessionStorage; it is
  * sent to the loopback bridge as an Authorization header only.
  */
@@ -48,11 +49,9 @@ const elements = {
 	modelCurrent: document.getElementById("model-current"),
 	modelForm: document.getElementById("model-form"),
 	modelSelect: document.getElementById("model-select"),
-	modelApply: document.getElementById("model-apply"),
 	modelStatus: document.getElementById("model-status"),
 	thinkingForm: document.getElementById("thinking-form"),
 	thinkingSelect: document.getElementById("thinking-select"),
-	thinkingApply: document.getElementById("thinking-apply"),
 	thinkingStatus: document.getElementById("thinking-status"),
 };
 
@@ -415,11 +414,20 @@ function subagentTokensText(tokens) {
 	if (!tokens || typeof tokens !== "object") {
 		return "Unknown";
 	}
-	return [
+	const parts = [
 		`in ${formatStatusNumber(tokens.input)}`,
 		`out ${formatStatusNumber(tokens.output)}`,
 		`total ${formatStatusNumber(tokens.total)}`,
-	].join(" · ");
+	];
+	// `window` is the child's current context size and `windowPeak` its peak: live context
+	// pressure is the part of a child's internal state that matters while it runs.
+	if (typeof tokens.window === "number") {
+		parts.push(`context ${formatStatusNumber(tokens.window)}`);
+	}
+	if (typeof tokens.windowPeak === "number") {
+		parts.push(`peak ${formatStatusNumber(tokens.windowPeak)}`);
+	}
+	return parts.join(" · ");
 }
 
 function appendSubagentText(parent, className, text) {
@@ -430,6 +438,9 @@ function appendSubagentText(parent, className, text) {
 	return node;
 }
 
+/* Fleet entries carry only what pi-subagents publishes: `role` exists for async chain steps
+   and `state` has no field in the fleet DTO at all, so an absent value is rendered as nothing
+   rather than as "Unknown". An entry in this list is active work by construction. */
 function renderFleetEntry(entry) {
 	const card = document.createElement("article");
 	card.className = "subagent-entry";
@@ -437,15 +448,19 @@ function renderFleetEntry(entry) {
 	title.className = "subagent-entry-title";
 	title.textContent = `Fleet entry ${subagentValue(entry.key)}`;
 	card.append(title);
-	appendSubagentText(card, "subagent-entry-meta", [
-		`agent: ${subagentValue(entry.agent)}`,
-		`role: ${subagentValue(entry.role)}`,
-		`model: ${subagentValue(entry.model)}`,
-		`effort: ${subagentValue(entry.effort)}`,
-		`state: ${subagentValue(entry.state)}`,
-		`tokens: ${subagentTokensText(entry.tokens)}`,
-		`started: ${subagentTime(entry.startedAt)}`,
-	].join(" · "));
+	const parts = [`agent: ${subagentValue(entry.agent)}`];
+	for (const [label, value] of [["role", entry.role], ["model", entry.model], ["effort", entry.effort], ["state", entry.state]]) {
+		if (typeof value === "string" && value.length > 0) {
+			parts.push(`${label}: ${value}`);
+		}
+	}
+	if (entry.tokens && typeof entry.tokens === "object") {
+		parts.push(`tokens: ${subagentTokensText(entry.tokens)}`);
+	}
+	if (typeof entry.startedAt === "number") {
+		parts.push(`started: ${subagentTime(entry.startedAt)}`);
+	}
+	appendSubagentText(card, "subagent-entry-meta", parts.join(" · "));
 	if (entry.goal) {
 		appendSubagentText(card, "subagent-entry-meta", `goal: ${entry.goal}`);
 	}
@@ -561,7 +576,7 @@ const INSPECT_ERROR_TEXT = Object.freeze({
 	unauthorized: ["Not authorized", "this page is no longer accepted by the running Pi process"],
 	bad_origin: ["Blocked", "the host rejected the request origin"],
 	foreign_session: ["Other session", "this run belongs to a different Pi session"],
-	not_found: ["Not found", "this run is not part of the current subagent snapshot any more"],
+	not_found: ["Not found", "this run is neither in the current subagent snapshot nor readable as a transcript"],
 	stale_generation: ["Stale session", "the session generation changed; wait for the new binding"],
 	stale: ["Stale snapshot", "the subagent snapshot is stale; refresh the subagents card and retry"],
 	reloading: ["Reloading", "the session is reloading; wait for the new generation"],
@@ -598,7 +613,7 @@ function inspectEntry(key, runId, { open = false } = {}) {
 		existing.runId = runId;
 		return existing;
 	}
-	const entry = { runId, open, status: "idle", payload: null, code: null, message: null };
+	const entry = { runId, open, status: "idle", payload: null, code: null, message: null, session: null };
 	state.subagentInspects.set(key, entry);
 	return entry;
 }
@@ -696,6 +711,10 @@ function renderInspectMessages(body, inspect, truncated) {
 }
 
 function renderInspectContent(body, inspect) {
+	if (inspect.kind === "transcript") {
+		renderInspectTranscript(body, inspect);
+		return;
+	}
 	const truncated = inspectTruncated(inspect);
 	const task = typeof inspect.task === "string" && inspect.task.length > 0 ? inspect.task : "";
 	appendInspectHeading(body, "Task");
@@ -720,6 +739,28 @@ function renderInspectContent(body, inspect) {
 	}
 }
 
+/*
+ * The extension serves blocking (foreground) delegations as text only: their transcript is
+ * what pi-subagents can answer with, so the panel shows it as-is instead of pretending a
+ * structured view exists. Path-looking lines are dropped by the host's redaction, which is
+ * the same rule the rest of the panel follows.
+ */
+function renderInspectTranscript(body, inspect) {
+	const text = typeof inspect.text === "string" ? inspect.text : "";
+	const lines = Number.isSafeInteger(inspect.lines) && inspect.lines > 0 ? inspect.lines : 0;
+	appendInspectHeading(body, "Child transcript", lines > 0 ? `last ${lines} lines` : "");
+	appendSubagentText(
+		body,
+		"subagent-inspect-empty",
+		"This run is a blocking (foreground) delegation. pi-subagents inspects async runs structurally and answers foreground runs with this transcript instead.",
+	);
+	if (text) {
+		appendSubagentText(body, "subagent-inspect-transcript", text);
+	} else {
+		appendSubagentText(body, "subagent-inspect-empty", "The host returned an empty transcript for this run.");
+	}
+}
+
 /** Repaint one existing panel from its cached entry (never sends a request by itself). */
 function paintInspect(nodes) {
 	const entry = state.subagentInspects.get(nodes.key);
@@ -727,7 +768,7 @@ function paintInspect(nodes) {
 		return;
 	}
 	const open = entry.open === true;
-	nodes.toggle.textContent = open ? "Hide structured view" : "Structured view";
+	nodes.toggle.textContent = open ? "Hide inspector" : "Inspect";
 	nodes.toggle.setAttribute("aria-expanded", open ? "true" : "false");
 	nodes.panel.classList.toggle("hidden", !open);
 	nodes.panel.setAttribute("aria-busy", entry.status === "loading" ? "true" : "false");
@@ -739,26 +780,147 @@ function paintInspect(nodes) {
 	}
 	if (entry.status === "loading") {
 		nodes.status.dataset.state = "waiting";
-		nodes.status.textContent = "Requesting the structured view…";
+		nodes.status.textContent = "Requesting the read-only view…";
 		return;
 	}
 	if (entry.status === "error") {
 		const failure = inspectFailureText(entry.code, entry.message);
 		nodes.status.dataset.state = "error";
-		nodes.status.textContent = `Structured view unavailable · ${failure.line}`;
+		nodes.status.textContent = `Inspector unavailable · ${failure.line}`;
 		appendSubagentText(nodes.body, "subagent-inspect-note", `Host reply: ${failure.detail || "no detail was returned"}`);
 		return;
 	}
 	const inspect = entry.payload && typeof entry.payload === "object" ? entry.payload : {};
-	const parts = [`status: ${subagentValue(inspect.status)}`];
+	const parts = [];
+	if (inspect.kind === "transcript") {
+		parts.push("transcript");
+	}
+	if (typeof inspect.status === "string" && inspect.status.length > 0) {
+		parts.push(`status: ${inspect.status}`);
+	}
+	if (typeof inspect.runId === "string" && inspect.runId.length > 0) {
+		parts.push(`run: ${inspect.runId}`);
+	}
 	if (typeof inspect.label === "string" && inspect.label.length > 0) {
 		parts.push(`label: ${inspect.label}`);
 	}
 	if (nodes.childId) {
 		parts.push(`child: ${nodes.childId}`);
 	}
-	appendSubagentText(nodes.body, "subagent-inspect-meta", parts.join(" · "));
+	if (parts.length > 0) {
+		appendSubagentText(nodes.body, "subagent-inspect-meta", parts.join(" · "));
+	}
 	renderInspectContent(nodes.body, inspect);
+	// A blocking (foreground) run has no structured view, but its child session file holds the
+	// full conversation the extension only summarises — show that as the content.
+	if (inspect.kind === "transcript") {
+		renderChildSession(nodes, entry);
+	}
+}
+
+function emptyChildSession() {
+	return { status: "idle", messages: [], cursor: null, earlier: false, window: null, code: null, message: null };
+}
+
+/**
+ * Render the child session page this entry has, if any: the newest page first, with the records
+ * drawn by the chat renderer (same rows, same thinking/tool blocks) and one explicit action for
+ * the page before it.
+ */
+function renderChildSession(nodes, entry) {
+	const session = entry.session;
+	if (!session || session.status === "idle") {
+		return;
+	}
+	const body = nodes.body;
+	if (session.status === "loading" && session.messages.length === 0) {
+		appendSubagentText(body, "subagent-inspect-empty", "Loading the child session from disk…");
+		return;
+	}
+	if (session.status === "error") {
+		const failure = inspectFailureText(session.code, session.message);
+		appendInspectHeading(body, "Child session");
+		appendSubagentText(body, "subagent-inspect-empty", `Unavailable · ${failure.line}`);
+		if (failure.detail) {
+			appendSubagentText(body, "subagent-inspect-note", `Host reply: ${failure.detail}`);
+		}
+		return;
+	}
+	const skipped = Number.isSafeInteger(session.window?.skipped) && session.window.skipped > 0 ? session.window.skipped : 0;
+	appendInspectHeading(body, "Child session", `${session.messages.length} record${session.messages.length === 1 ? "" : "s"}${session.window?.truncatedHead ? " · file tail" : ""}`);
+	if (session.earlier && Number.isSafeInteger(session.cursor)) {
+		const more = document.createElement("button");
+		more.type = "button";
+		more.className = "subagent-inspect-more ghost small";
+		more.textContent = "Load older records";
+		more.addEventListener("click", () => requestChildSession(nodes, { before: session.cursor }));
+		body.append(more);
+	}
+	if (session.messages.length === 0) {
+		appendSubagentText(body, "subagent-inspect-empty", "The child session file holds no conversation records yet.");
+	}
+	for (const message of session.messages) {
+		body.append(chatCardFor(message));
+	}
+	if (skipped > 0) {
+		appendSubagentText(body, "subagent-inspect-empty", `${skipped} record${skipped === 1 ? "" : "s"} in this window are session metadata or could not be read.`);
+	}
+}
+
+/**
+ * Read one page of the run's child session (host-side disk read, bounded and derived from the
+ * run id — the page never names a path). `before` walks one page further back.
+ */
+async function requestChildSession(nodes, { before = null } = {}) {
+	const entry = state.subagentInspects.get(nodes.key);
+	if (!entry || state.generation === null) {
+		return;
+	}
+	const session = entry.session ?? (entry.session = emptyChildSession());
+	if (session.status === "loading") {
+		return;
+	}
+	session.status = "loading";
+	if (before === null) {
+		session.messages = [];
+		session.cursor = null;
+		session.earlier = false;
+		session.window = null;
+		session.code = null;
+		session.message = null;
+	}
+	repaintInspect(nodes.key);
+	try {
+		const response = await api("/api/subagents/session", {
+			method: "POST",
+			body: { generation: state.generation, id: entry.runId, index: 0, ...(before === null ? {} : { before }) },
+		});
+		const payload = await response.json().catch(() => ({}));
+		if (!response.ok) {
+			session.status = "error";
+			session.code = payload?.error?.code ?? `http_${response.status}`;
+			session.message = payload?.error?.message ?? "unknown reason";
+			if (response.status === 401) {
+				handleUnauthorized();
+			}
+			repaintInspect(nodes.key);
+			return;
+		}
+		const messages = Array.isArray(payload?.messages) ? payload.messages : [];
+		session.messages = before === null ? messages : [...messages, ...session.messages];
+		session.cursor = Number.isSafeInteger(payload?.cursor) ? payload.cursor : null;
+		session.earlier = payload?.earlier === true;
+		session.window = payload?.window && typeof payload.window === "object" ? payload.window : null;
+		session.code = null;
+		session.message = null;
+		session.status = "ready";
+		repaintInspect(nodes.key);
+	} catch (error) {
+		session.status = "error";
+		session.code = "network";
+		session.message = error instanceof Error ? error.message : String(error);
+		repaintInspect(nodes.key);
+	}
 }
 
 function repaintInspect(key) {
@@ -816,6 +978,13 @@ async function requestInspect(nodes) {
 		current.payload = inspect;
 		current.code = null;
 		current.message = null;
+		if (inspect.kind === "transcript") {
+			// The extension can only summarise a blocking run; the content lives in its child
+			// session file, so the panel reads that next (and says so while it waits).
+			current.session = emptyChildSession();
+			await requestChildSession(nodes);
+			return;
+		}
 		repaintInspect(nodes.key);
 	} catch (error) {
 		setInspectFailure(nodes.key, "network", error instanceof Error ? error.message : String(error));
@@ -857,8 +1026,9 @@ function buildInspectPanel({ runId, childId = null, label, keyPrefix = "run" }) 
 	}
 	const toggle = document.createElement("button");
 	toggle.type = "button";
-	// The structured view is the primary path (it is what the panel is for); the raw artifact
-	// transcript keeps working as the documented fallback.
+	// One read-only inspector per run: the panel renders whatever pi-subagents can serve for
+	// the run the row named — a structured view for async runs, a text transcript for blocking
+	// (foreground) ones — and the raw artifact transcript stays the rail's separate fallback.
 	toggle.className = "subagent-inspect-toggle primary";
 	toggle.setAttribute("aria-controls", panelId);
 	const panel = document.createElement("div");
@@ -890,12 +1060,12 @@ function renderChildNode(runId, child, depth = 0) {
 	appendSubagentText(item, "subagent-child-summary", summaryText(child));
 	const childId = typeof child?.id === "string" && child.id.length > 0 ? child.id : null;
 	if (childId) {
-		item.append(buildInspectPanel({ runId, childId, label: `Structured view of child node ${childId}` }));
+		item.append(buildInspectPanel({ runId, childId, label: `Read-only inspector for child node ${childId}` }));
 	} else {
 		appendSubagentText(
 			item,
 			"subagent-inspect-unavailable",
-			"Structured view unavailable: this node has no id in the status snapshot, and the host only accepts node ids it has reported.",
+			"Read-only inspector unavailable: this node has no id in the status snapshot, and the host only accepts node ids it has reported.",
 		);
 	}
 	const nested = Array.isArray(child?.children) ? child.children : [];
@@ -939,14 +1109,16 @@ function renderAsyncRun(run) {
 	title.className = "subagent-run-title";
 	title.textContent = run.label ? `${run.label} (${subagentValue(run.id)})` : `Async run ${subagentValue(run.id)}`;
 	card.append(title);
-	appendSubagentText(card, "subagent-run-meta", [
-		`state: ${subagentValue(run.state)}`,
-		`mode: ${subagentValue(run.mode)}`,
-		`model: ${subagentValue(run.model)}`,
-		`started: ${subagentTime(run.startedAt)}`,
-		`last update: ${subagentTime(run.updatedAt)}`,
-		`ended: ${subagentTime(run.endedAt)}`,
-	].join(" · "));
+	// Only the fields this run actually reports: a running run has no `ended`, and an omitted
+	// model is not "Unknown", it is simply not part of the answer.
+	const meta = [];
+	if (typeof run.state === "string" && run.state.length > 0) meta.push(`state: ${run.state}`);
+	if (typeof run.mode === "string" && run.mode.length > 0) meta.push(`mode: ${run.mode}`);
+	if (typeof run.model === "string" && run.model.length > 0) meta.push(`model: ${run.model}`);
+	if (typeof run.startedAt === "number") meta.push(`started: ${subagentTime(run.startedAt)}`);
+	if (typeof run.updatedAt === "number") meta.push(`last update: ${subagentTime(run.updatedAt)}`);
+	if (typeof run.endedAt === "number") meta.push(`ended: ${subagentTime(run.endedAt)}`);
+	if (meta.length > 0) appendSubagentText(card, "subagent-run-meta", meta.join(" · "));
 	if (run.goal) appendSubagentText(card, "subagent-run-goal", `goal: ${run.goal}`);
 	const actions = document.createElement("div");
 	actions.className = "subagent-run-actions";
@@ -959,10 +1131,11 @@ function renderAsyncRun(run) {
 	button.addEventListener("click", () => requestSubagentDetail(card, run.id, button, result));
 	actions.append(button, result);
 	card.append(actions);
-	// The two views are not alternatives: the structured view reads the child session while
-	// the transcript stays the raw artifact tail that still works when the former cannot.
-	appendSubagentText(card, "subagent-run-note", "Structured view = parsed child session (task · messages · tools). Transcript = raw artifact tail (fallback).");
-	card.append(buildInspectPanel({ runId: run.id, label: `Structured view of async run ${run.id}` }));
+	// The two views are not alternatives: the inspector renders whatever shape pi-subagents
+	// serves for this run (structured child session for async, transcript for a blocking run),
+	// while the artifact tail below stays the rail's own raw fallback.
+	appendSubagentText(card, "subagent-run-note", "Inspector = what pi-subagents serves for this run (a structured child session, or a transcript for blocking runs). The artifact tail below is the raw fallback.");
+	card.append(buildInspectPanel({ runId: run.id, label: `Read-only inspector for async run ${run.id}` }));
 	renderChildrenList(card, run);
 	renderSummaryList(card, "Result summaries", run.results, "subagent-results");
 	return card;
@@ -975,7 +1148,18 @@ function subagentsStatusText(snapshot) {
 		const fleetOmitted = snapshot.fleet?.omitted ?? 0;
 		const asyncOmitted = snapshot.asyncSnapshot?.omitted?.runs ?? 0;
 		const omitted = fleetOmitted + asyncOmitted;
-		return ["Ready · empty", "ready", omitted > 0 ? `No visible entries; ${omitted} entry/run item(s) were omitted or truncated.` : "No fleet entries or async runs are active."];
+		if (omitted > 0) return ["Ready · empty", "ready", `No visible entries; ${omitted} entry/run item(s) were omitted or truncated.`];
+		// A finished blocking delegation leaves the active fleet, but its chat row keeps the run
+		// inspectable: "nothing is active" must not read as "nothing is readable".
+		const referenced = Number.isSafeInteger(snapshot.referencedRuns) && snapshot.referencedRuns > 0 ? snapshot.referencedRuns : 0;
+		if (referenced > 0) {
+			return [
+				"Ready · empty",
+				"ready",
+				`No active fleet entries or async runs. ${referenced} finished run${referenced === 1 ? "" : "s"} stay${referenced === 1 ? "s" : ""} inspectable from ${referenced === 1 ? "its" : "their"} chat row.`,
+			];
+		}
+		return ["Ready · empty", "ready", "No fleet entries or async runs are active."];
 	}
 	if (snapshot.state === "ready-data") {
 		const fleetCount = Array.isArray(snapshot.fleet?.entries) ? snapshot.fleet.entries.length : 0;
@@ -1074,42 +1258,64 @@ function modelLabel(model) {
 	return identity ? `${identity}${name}` : "unavailable";
 }
 
+/**
+ * Value a rebuilt select should show: the pick the user just made while it is still
+ * offered (its change request may still be in flight), otherwise the host's current
+ * value, otherwise nothing.
+ */
+function keepSelectedValue(optionValues, selected, fallback) {
+	if (selected && optionValues.includes(selected)) {
+		return selected;
+	}
+	return fallback && optionValues.includes(fallback) ? fallback : "";
+}
+
+/** `provider/id` identity of the host's current model, or "" when it is unknown. */
+function currentModelKey(controls) {
+	const model = controls?.model;
+	if (!model || typeof model.provider !== "string" || typeof model.id !== "string") {
+		return "";
+	}
+	return `${model.provider}/${model.id}`;
+}
+
 function renderControls(controls) {
+	// `renderControls` runs on every poll (~600 ms) and rebuilds both selects, which
+	// clears `select.value`. Read the open selections first so the pick whose change
+	// request is still in flight survives the rebuild instead of snapping back to the
+	// current model/level before the request lands.
+	const selectedModelKey = elements.modelSelect.value;
+	const selectedThinkingLevel = elements.thinkingSelect.value;
+
 	if (!controls || controls.available !== true) {
 		elements.controlsState.textContent = "Unavailable";
 		elements.modelCurrent.textContent = "Current model: unavailable";
 		elements.modelSelect.textContent = "";
 		elements.thinkingSelect.textContent = "";
 		elements.modelSelect.disabled = true;
-		elements.modelApply.disabled = true;
 		elements.thinkingSelect.disabled = true;
-		elements.thinkingApply.disabled = true;
 		state.controls = null;
 		return;
 	}
 
 	const candidates = Array.isArray(controls.candidates) ? controls.candidates : [];
-	const currentKey = controls.model && typeof controls.model.provider === "string" && typeof controls.model.id === "string"
-		? `${controls.model.provider}/${controls.model.id}`
-		: "";
+	const currentKey = currentModelKey(controls);
 	elements.controlsState.textContent = state.reloading ? "Reloading…" : "Connected";
 	elements.modelCurrent.textContent = `Current model: ${modelLabel(controls.model)}`;
 	elements.modelSelect.textContent = "";
+	const candidateKeys = [];
 	for (const candidate of candidates) {
 		if (!candidate || typeof candidate.key !== "string") {
 			continue;
 		}
+		candidateKeys.push(candidate.key);
 		const option = document.createElement("option");
 		option.value = candidate.key;
 		const thinking = typeof candidate.thinkingLevel === "string" ? ` · thinking ${candidate.thinkingLevel}` : "";
 		option.textContent = `${modelLabel(candidate)}${thinking}`;
 		elements.modelSelect.append(option);
 	}
-	if (currentKey && candidates.some((candidate) => candidate?.key === currentKey)) {
-		elements.modelSelect.value = currentKey;
-	} else {
-		elements.modelSelect.value = "";
-	}
+	elements.modelSelect.value = keepSelectedValue(candidateKeys, selectedModelKey, currentKey);
 
 	const levels = Array.isArray(controls.thinkingLevels) && controls.thinkingLevels.length > 0
 		? controls.thinkingLevels.filter((level) => FALLBACK_THINKING_LEVELS.includes(level))
@@ -1121,17 +1327,11 @@ function renderControls(controls) {
 		option.textContent = level;
 		elements.thinkingSelect.append(option);
 	}
-	if (typeof controls.thinkingLevel === "string" && levels.includes(controls.thinkingLevel)) {
-		elements.thinkingSelect.value = controls.thinkingLevel;
-	} else {
-		elements.thinkingSelect.value = "";
-	}
+	elements.thinkingSelect.value = keepSelectedValue(levels, selectedThinkingLevel, controls.thinkingLevel);
 
 	const disabled = state.reloading;
 	elements.modelSelect.disabled = disabled || candidates.length === 0 || state.modelSending;
-	elements.modelApply.disabled = disabled || candidates.length === 0 || state.modelSending;
 	elements.thinkingSelect.disabled = disabled || levels.length === 0 || state.thinkingSending;
-	elements.thinkingApply.disabled = disabled || levels.length === 0 || state.thinkingSending;
 	state.controls = controls;
 }
 
@@ -1187,6 +1387,11 @@ async function submitModel() {
 		setControlStatus(elements.modelStatus, "Choose an available model candidate first.", "error");
 		return;
 	}
+	if (key === currentModelKey(state.controls)) {
+		// The select already shows the model the host reports as current: re-picking it
+		// is not a change and must not add another request (or another status line).
+		return;
+	}
 	await submitControl("/api/model", { key }, "model");
 }
 
@@ -1194,6 +1399,9 @@ async function submitThinking() {
 	const level = elements.thinkingSelect.value;
 	if (!FALLBACK_THINKING_LEVELS.includes(level)) {
 		setControlStatus(elements.thinkingStatus, "Choose an allowed thinking level first.", "error");
+		return;
+	}
+	if (state.controls?.thinkingLevel === level) {
 		return;
 	}
 	await submitControl("/api/thinking", { level }, "thinking");
@@ -1218,6 +1426,77 @@ function toolResultText(block) {
 		return content || (error ? `Error: ${error}` : "");
 	}
 	return `Error: ${error}${content ? `\n${content}` : ""}`;
+}
+
+let markdownIsland = null;
+let markdownIslandPromise = null;
+
+function loadMarkdownIsland() {
+	if (markdownIslandPromise) {
+		return markdownIslandPromise;
+	}
+	markdownIslandPromise = import("./markdown-island.jsx")
+		.then((mod) => {
+			markdownIsland = mod;
+			return mod;
+		})
+		.catch(() => {
+			markdownIsland = false;
+			return null;
+		});
+	return markdownIslandPromise;
+}
+
+loadMarkdownIsland();
+
+function messageIsStreaming(message) {
+	return state.chat?.phase === "streaming"
+		&& Boolean(message?.id)
+		&& state.chatOrder[state.chatOrder.length - 1] === message.id
+		&& message.role !== "user";
+}
+
+function shouldMarkdown(message) {
+	return message?.role === "assistant" || message?.role === "system" || !message?.role;
+}
+
+function unmountMarkdownHosts(root) {
+	if (!root) {
+		return;
+	}
+	const hosts = [];
+	if (root.classList?.contains("chat-markdown")) {
+		hosts.push(root);
+	}
+	if (typeof root.querySelectorAll === "function") {
+		hosts.push(...root.querySelectorAll(".chat-markdown"));
+	}
+	const api = markdownIsland && markdownIsland !== false ? markdownIsland : null;
+	for (const host of hosts) {
+		api?.unmountMarkdown(host);
+	}
+}
+
+function paintMarkdownHost(host, text, streaming) {
+	host.dataset.markdownText = text;
+	host.dataset.streaming = streaming ? "1" : "0";
+	if (markdownIsland && markdownIsland !== false) {
+		markdownIsland.mountMarkdown(host, { text, streaming });
+		return;
+	}
+	host.textContent = text;
+	if (markdownIsland === false) {
+		return;
+	}
+	loadMarkdownIsland().then((mod) => {
+		if (!mod || !host.isConnected) {
+			return;
+		}
+		const next = host.dataset.markdownText ?? "";
+		const nextStreaming = host.dataset.streaming === "1";
+		host.textContent = "";
+		mod.mountMarkdown(host, { text: next, streaming: nextStreaming });
+	});
 }
 
 function blockDetails(block, key, open) {
@@ -1259,9 +1538,40 @@ function renderChatBlocks(card, message) {
 	for (const details of container.querySelectorAll("details")) {
 		previousOpen.set(details.dataset.blockKey, details.open === true);
 	}
+	const textHosts = new Map();
+	let inspectPanel = null;
 	for (const child of [...container.children]) {
-		child.remove();
+		if (child.classList?.contains("subagent-inspect")) {
+			inspectPanel = child;
+			continue;
+		}
+		if (child.classList?.contains("chat-text") && child.dataset.blockKey) {
+			textHosts.set(child.dataset.blockKey, child);
+		}
 	}
+
+	const nextChildren = [];
+	const usedKeys = new Set();
+	const streaming = messageIsStreaming(message);
+	const markdown = shouldMarkdown(message);
+
+	const takeTextHost = (key, text) => {
+		let host = textHosts.get(key);
+		if (!host) {
+			host = document.createElement("div");
+			host.className = "chat-text";
+			host.dataset.blockKey = key;
+		}
+		if (markdown) {
+			host.classList.add("chat-markdown");
+			paintMarkdownHost(host, text, streaming);
+		} else {
+			host.classList.remove("chat-markdown");
+			host.textContent = text;
+		}
+		usedKeys.add(key);
+		nextChildren.push(host);
+	};
 
 	const blocks = Array.isArray(message.blocks) ? message.blocks : [];
 	let rendered = 0;
@@ -1272,10 +1582,7 @@ function renderChatBlocks(card, message) {
 			return;
 		}
 		if (block.type === "text") {
-			const text = document.createElement("p");
-			text.className = "chat-text";
-			text.textContent = typeof block.text === "string" ? block.text : "";
-			container.append(text);
+			takeTextHost(blockKey(block, index), typeof block.text === "string" ? block.text : "");
 			rendered += 1;
 			hasVisibleText = true;
 			return;
@@ -1289,41 +1596,41 @@ function renderChatBlocks(card, message) {
 		const key = blockKey(block, index);
 		const longOutput = block.type === "toolResult" && toolResultText(block).length > 1200;
 		const defaultOpen = block.type === "toolResult" ? !longOutput : false;
-		container.append(blockDetails(block, key, previousOpen.has(key) ? previousOpen.get(key) : defaultOpen));
+		nextChildren.push(blockDetails(block, key, previousOpen.has(key) ? previousOpen.get(key) : defaultOpen));
+		usedKeys.add(key);
 		rendered += 1;
 	});
 
 	if (rendered === 0 || (typeof message.text === "string" && message.text.length > 0 && !hasVisibleText && !hasToolResult)) {
-		const text = document.createElement("p");
-		text.className = "chat-text";
-		text.textContent = typeof message.text === "string" ? message.text : "";
-		container.append(text);
+		takeTextHost("text:fallback:0", typeof message.text === "string" ? message.text : "");
+	}
+
+	for (const [key, host] of textHosts) {
+		if (!usedKeys.has(key)) {
+			unmountMarkdownHosts(host);
+		}
 	}
 
 	// A pi-subagents tool result names the async run it launched, so the chat row can open the
 	// same structured view the rail offers. The chat scope keeps its own panel state: the rail
 	// panel for the same run must not be repainted by this one.
 	const runId = typeof message.subagentRunId === "string" ? message.subagentRunId : null;
-	let existing = null;
-	for (const child of [...container.children]) {
-		if (child.classList?.contains("subagent-inspect")) {
-			existing = child;
-		}
-	}
 	if (runId) {
-		if (!existing || existing.dataset.runId !== runId) {
-			existing?.remove();
-			const panel = buildInspectPanel({
+		if (!inspectPanel || inspectPanel.dataset.runId !== runId) {
+			inspectPanel?.remove();
+			inspectPanel = buildInspectPanel({
 				runId,
-				label: `Structured view of subagent run ${runId}`,
+				label: `Read-only inspector for subagent run ${runId}`,
 				keyPrefix: CHAT_INSPECT_KEY_PREFIX.slice(0, -1),
 			});
-			panel.classList.add("subagent-inspect-chat");
-			container.append(panel);
+			inspectPanel.classList.add("subagent-inspect-chat");
 		}
+		nextChildren.push(inspectPanel);
 	} else {
-		existing?.remove();
+		inspectPanel?.remove();
 	}
+
+	container.replaceChildren(...nextChildren);
 }
 
 function chatCardFor(message) {
@@ -1354,6 +1661,7 @@ function validChatRevision(value) {
 
 function clearChatCards() {
 	for (const [, card] of state.chatRendered) {
+		unmountMarkdownHosts(card);
 		card.remove();
 	}
 	state.chatRendered.clear();
@@ -1471,6 +1779,10 @@ function renderChat(chat) {
 		}
 	}
 	applyChatSnapshot(chat);
+	// MarkdownText keeps TeX literal while streaming. The island must see the
+	// current phase (not the previous poll) and must re-render on idle even when
+	// the message revision did not change, otherwise formulas stay as `$…$`.
+	state.chat = chat;
 	const phase = chat.phase || "unknown";
 	const delivery = elements.chatDelivery.value || "normal";
 	const deliveryCanSend = phase === "idle" || (phase === "streaming" && delivery !== "normal");
@@ -1488,9 +1800,12 @@ function renderChat(chat) {
 		seen.add(message.id);
 		const existing = state.chatRendered.get(message.id);
 		const revision = validChatRevision(message.revision) ? message.revision : null;
+		const streaming = messageIsStreaming(message);
 		if (existing) {
-			if (revision === null || state.chatRenderedRevisions.get(message.id) !== revision) {
+			const wasStreaming = existing.dataset.markdownStreaming === "1";
+			if (revision === null || state.chatRenderedRevisions.get(message.id) !== revision || streaming !== wasStreaming) {
 				updateChatCard(existing, message);
+				existing.dataset.markdownStreaming = streaming ? "1" : "0";
 				if (revision === null) {
 					state.chatRenderedRevisions.delete(message.id);
 					delete existing.dataset.revision;
@@ -1503,6 +1818,7 @@ function renderChat(chat) {
 			continue;
 		}
 		const card = chatCardFor(message);
+		card.dataset.markdownStreaming = streaming ? "1" : "0";
 		if (revision !== null) {
 			state.chatRenderedRevisions.set(message.id, revision);
 			card.dataset.revision = String(revision);
@@ -1513,6 +1829,7 @@ function renderChat(chat) {
 	}
 	for (const [id, card] of [...state.chatRendered.entries()]) {
 		if (!seen.has(id)) {
+			unmountMarkdownHosts(card);
 			card.remove();
 			state.chatRendered.delete(id);
 			state.chatRenderedRevisions.delete(id);
@@ -1523,7 +1840,6 @@ function renderChat(chat) {
 	// Always restore the ordinary empty-state wording: the detached wording is set by
 	// renderChat() when chat is unavailable, and this element stays hidden while rows exist.
 	elements.chatEmpty.textContent = "No chat messages yet.";
-	state.chat = chat;
 }
 
 function deliveryLabel(delivery) {
@@ -1859,21 +2175,28 @@ elements.chatStop.addEventListener("click", () => {
 	stopChat();
 });
 
-elements.modelForm.addEventListener("submit", (event) => {
-	event.preventDefault();
+// Choosing a model or a thinking level applies it: the selects submit on `change` and
+// there is no second confirmation button. Both forms only group label, field and status,
+// so an implicit submit (Enter/… on a platform that supports it) must not reload the page.
+elements.modelSelect.addEventListener("change", () => {
 	submitModel();
 });
 
-elements.thinkingForm.addEventListener("submit", (event) => {
-	event.preventDefault();
+elements.thinkingSelect.addEventListener("change", () => {
 	submitThinking();
 });
+
+for (const form of [elements.modelForm, elements.thinkingForm]) {
+	form.addEventListener("submit", (event) => {
+		event.preventDefault();
+	});
+}
 
 if (!state.token) {
 	showAuth("No token found in this URL. Open the browser URL of the running Pi session.");
 	setConnection("Waiting for a token", "notice");
 } else {
-	setReloadState("Idle", "");
+	setReloadState("", "");
 	loop();
 }
 

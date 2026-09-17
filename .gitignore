@@ -1,6 +1,9 @@
 # Runtime artifacts written by the browser GUI host while a session runs.
 .browser-ui/
 
+# Built browser UI (Vite). `npm start` rebuilds this before serving.
+dist/
+
 # Node
 node_modules/
 npm-debug.log*

@@ -5,10 +5,13 @@
  */
 
 import assert from "node:assert/strict";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { BROWSER_BLOCKED_PORTS, CLIENT_SELF_CHECK_TIMEOUT_MS, isBrowserBlockedPort, startBridgeServer } from "../src/core/bridge-server.js";
+import { BROWSER_BLOCKED_PORTS, CLIENT_SELF_CHECK_TIMEOUT_MS, isBrowserBlockedPort, resolvePublicAsset, startBridgeServer } from "../src/core/bridge-server.js";
 import { LIMITS, RequestStore } from "../src/core/request-store.js";
 
 const ASSETS_DIR = fileURLToPath(new URL("../src/browser/", import.meta.url));
@@ -479,6 +482,36 @@ describe("bridge transport security", () => {
 		assert.equal((await rawRequest("/%2e%2e/package.json")).status, 404);
 		assert.equal((await rawRequest("/../package.json")).status, 404);
 		assert.equal((await rawRequest("/api/unknown")).status, 404);
+	});
+
+	it("maps hashed Vite assets and rejects traversal", () => {
+		assert.deepEqual(resolvePublicAsset("/app.js"), { relative: "app.js", ext: ".js" });
+		assert.deepEqual(resolvePublicAsset("/assets/index-abc12.js"), { relative: "assets/index-abc12.js", ext: ".js" });
+		assert.deepEqual(resolvePublicAsset("/assets/KaTeX_Main-Regular.woff2"), { relative: "assets/KaTeX_Main-Regular.woff2", ext: ".woff2" });
+		assert.deepEqual(resolvePublicAsset("/assets/fonts/KaTeX_Main-Regular.woff2"), { relative: "assets/fonts/KaTeX_Main-Regular.woff2", ext: ".woff2" });
+		assert.equal(resolvePublicAsset("/assets/../package.json"), null);
+		assert.equal(resolvePublicAsset("/assets/%2e%2e/package.json"), null);
+		assert.equal(resolvePublicAsset("/assets/foo.map"), null);
+		assert.equal(resolvePublicAsset("/package.json"), null);
+	});
+
+	it("serves hashed Vite assets from a built directory", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "pi-gui-assets-"));
+		await mkdir(join(dir, "assets"));
+		await writeFile(join(dir, "index.html"), "<!doctype html><title>built</title>");
+		await writeFile(join(dir, "assets", "app-test.js"), "export {}\n");
+		const extra = await startBridgeServer({ store: new RequestStore(), assetsDir: dir });
+		try {
+			const js = await fetch(`${extra.origin}/assets/app-test.js`);
+			assert.equal(js.status, 200);
+			assert.match(js.headers.get("content-type") ?? "", /javascript/);
+			assert.equal(await js.text(), "export {}\n");
+			const denied = await fetch(`${extra.origin}/assets/../package.json`);
+			assert.equal(denied.status, 404);
+		} finally {
+			await extra.close();
+			await rm(dir, { recursive: true, force: true });
+		}
 	});
 
 	it("rejects requests whose Host header is not the bound loopback authority", async () => {
