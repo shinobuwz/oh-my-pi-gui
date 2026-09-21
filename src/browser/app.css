@@ -2049,7 +2049,10 @@ option {
 	overflow-wrap: anywhere;
 }
 
-.subagent-inspect-message,
+/* The structured message list is drawn with the main conversation's own chat rows
+   (`.chat-message`, `.chat-block`): same bubble, Markdown answer and collapsible tool blocks,
+   so this read-only view cannot drift into a second, flat style. Only the panel's own notes and
+   empty states keep a local look. */
 .subagent-inspect-note {
 	margin: 0;
 	padding: 8px 10px;
@@ -2065,45 +2068,19 @@ option {
 	color: var(--warn);
 }
 
-.subagent-inspect-label {
-	margin: 0 0 2px;
-	color: var(--text-caption);
-	font-size: var(--fs-caption);
-	font-family: var(--font-mono);
-	overflow-wrap: anywhere;
-}
-
-.subagent-inspect-text,
 .subagent-inspect-empty,
-.subagent-inspect-unavailable {
+.subagent-inspect-unavailable,
+.subagent-child-note {
 	margin: 0;
 	color: var(--text-2);
 	white-space: pre-wrap;
 	overflow-wrap: anywhere;
 }
 
-.subagent-inspect-unavailable {
+.subagent-inspect-unavailable,
+.subagent-child-note {
 	color: var(--text-3);
 	font-size: var(--fs-sm);
-}
-
-.subagent-inspect-message[data-kind="toolCall"],
-.subagent-inspect-message[data-kind="toolResult"] {
-	background: var(--bg-layer-2);
-}
-
-.subagent-inspect-message[data-kind="toolResult"] {
-	border-color: var(--border-l2);
-}
-
-.subagent-inspect-message[data-state="error"] {
-	border-color: var(--err-soft);
-	background: var(--err-soft);
-}
-
-.subagent-inspect-message[data-state="error"] .subagent-inspect-text,
-.subagent-inspect-message[data-kind="toolResult"] .subagent-inspect-label {
-	color: var(--err);
 }
 
 /* ----------------------------------------------------------------- narrow -- */

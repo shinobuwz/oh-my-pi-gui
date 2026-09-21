@@ -417,7 +417,7 @@ function runCard(environment) {
 	return environment.document.getElementById("subagents-detail-content").querySelector(".subagent-run");
 }
 
-test("sends no structured inspection until the run action is clicked, then renders the payload as text", async () => {
+test("sends no structured inspection until the run action is clicked, then renders the payload with the chat rows", async () => {
 	const { environment, page, inspectCalls } = await bootInspect({ respond: () => inspectOk(SUCCESS_INSPECT) });
 	const card = runCard(environment);
 	const toggle = card.querySelector(".subagent-inspect-toggle");
@@ -450,22 +450,25 @@ test("sends no structured inspection until the run action is clicked, then rende
 	assert.equal(panel.querySelector("script"), null);
 	assert.match(panel.querySelector(".subagent-inspect-task").textContent, /<script>alert\(1\)<\/script>/);
 
-	const messages = panel.querySelectorAll(".subagent-inspect-message");
-	assert.deepEqual(messages.map((item) => item.dataset.kind), ["text", "toolCall", "toolResult", "text", "toolResult"]);
-	assert.deepEqual(messages.map((item) => item.querySelector(".subagent-inspect-label").textContent), [
-		"user",
-		"assistant · tool call: bash",
-		"tool result",
-		"assistant",
-		"tool result: read (error)",
-	]);
-	assert.equal(messages[1].querySelector(".subagent-inspect-text").textContent, "[tool: bash]");
-	assert.equal(messages[2].querySelector(".subagent-inspect-text").textContent, "structured-probe");
-	assert.equal(messages[3].dataset.state, "error", "isError results must be marked for the danger colour");
-	assert.equal(messages[3].querySelector(".subagent-inspect-text").textContent, "command failed");
-	assert.equal(messages[4].dataset.state, "error");
-	assert.equal(messages[4].querySelector(".subagent-inspect-text").textContent, "no such file");
-	assert.equal(messages[0].dataset.state, undefined);
+	// The structured view is the main conversation's own row set — same user bubble, same
+	// Markdown answer, same collapsible tool blocks — instead of a second, flat text style.
+	const rows = panel.querySelectorAll(".chat-message");
+	assert.deepEqual(rows.map((row) => row.dataset.role), ["user", "assistant", "toolResult", "assistant", "toolResult"]);
+	assert.deepEqual(rows.map((row) => row.querySelector(".chat-message-label").textContent), ["user", "assistant", "tool", "assistant", "read"]);
+	assert.equal(rows[0].querySelector(".chat-text").textContent, "structured view probe");
+	const toolCall = rows[1].querySelector("details.chat-tool-call");
+	assert.equal(toolCall.querySelector("summary").textContent, "Tool call: bash");
+	assert.equal(toolCall.querySelector(".chat-block-content").textContent, "[tool: bash]");
+	assert.equal(toolCall.open, false, "a tool call stays collapsed, exactly like the main transcript");
+	assert.equal(rows[1].querySelector(".chat-text"), null, "a tool block is the whole row: no duplicate plain-text row is added");
+	const result = rows[2].querySelector("details.chat-tool-result");
+	assert.equal(result.querySelector("summary").textContent, "Tool result: tool");
+	assert.equal(result.querySelector(".chat-block-content").textContent, "structured-probe");
+	assert.equal(result.open, true, "a short tool result opens by itself, exactly like the main transcript");
+	assert.equal(rows[3].querySelector(".chat-text").textContent, "command failed");
+	const failed = rows[4].querySelector("details.chat-tool-result");
+	assert.equal(failed.querySelector("summary").textContent, "Tool result: read (error)", "a failed tool result keeps the chat row's error marker");
+	assert.equal(failed.querySelector(".chat-block-content").textContent, "no such file");
 	assert.equal(panel.querySelector(".subagent-inspect-final").textContent, "DONE");
 	assert.equal(panel.querySelectorAll("button").length, 0, "the panel is read-only: no steer/resume/stop controls");
 	assert.equal(/steer|resume|\bstop\b/i.test(text), false);
@@ -623,7 +626,7 @@ test("reports every truncation the host flags and keeps unknown task/output expl
 	assert.match(panel.textContent, /final output was truncated/);
 	assert.match(panel.textContent, /Unknown — no task text was reported/);
 	assert.match(panel.textContent, /Unknown — no final output was reported/);
-	assert.equal(panel.querySelectorAll(".subagent-inspect-message").length, 1);
+	assert.equal(panel.querySelectorAll(".chat-message").length, 1);
 
 	// Zero dropped messages means no truncation note at all.
 	const clean = await bootInspect({
@@ -687,7 +690,7 @@ test("renders a running run with no messages as a normal empty state, not an err
 	assert.match(panel.textContent, /still running and its child session has no readable messages yet/);
 	assert.match(panel.textContent, /normal, not a failure/);
 	assert.equal(/unavailable|error|timed out|failed/i.test(panel.textContent), false);
-	assert.equal(panel.querySelector(".subagent-inspect-messages"), null);
+	assert.equal(panel.querySelector(".chat-message"), null);
 	assert.equal(panel.querySelectorAll(".subagent-inspect-note").length, 0);
 
 	// A finished run with no messages says so plainly instead of claiming a failure.
@@ -700,26 +703,40 @@ test("renders a running run with no messages as a normal empty state, not an err
 	assert.match(finishedCard.querySelector(".subagent-inspect-panel").textContent, /The host returned no messages for this run\./);
 });
 
-test("offers the structured view only for child nodes that have an id", async () => {
+test("opens child summaries and their inspectors by default, and reads them one at a time", async () => {
 	const run = {
 		...INSPECT_RUN,
 		children: [
-			{ id: "step:0", label: "plan", state: "done" },
+			{ id: "step:0", mode: "step", label: "plan", state: "done" },
 			{ label: "anonymous step", state: "running" },
-			{ id: "step:1", state: "done", children: [{ id: "step:1:0", state: "done" }, { state: "running" }] },
+			{ id: "step:1", mode: "step", state: "done", children: [{ id: "step:1:0", mode: "step", state: "done" }, { state: "running" }] },
 		],
 	};
+	let inFlight = 0;
+	let maxInFlight = 0;
+	const pending = [];
 	const { environment, page, inspectCalls } = await bootInspect({
 		snapshot: subagentsSnapshot({ runs: [run] }),
-		respond: () => inspectOk({ ...SUCCESS_INSPECT, childId: "step:0" }),
+		respond: () => {
+			inFlight += 1;
+			maxInFlight = Math.max(maxInFlight, inFlight);
+			return new Promise((resolve) => {
+				pending.push((response) => {
+					inFlight -= 1;
+					resolve(response);
+				});
+			});
+		},
 	});
 	const card = runCard(environment);
 	const children = card.querySelectorAll(".subagent-child");
 	assert.equal(children.length, 5, "id-bearing and id-less nodes both stay visible");
+	assert.equal(card.querySelector(".subagent-children").open, true, "the child summaries are shown without a click");
 
 	const withId = children[0];
 	const withoutId = children[1];
-	assert.equal(withId.querySelector(".subagent-inspect-toggle").textContent, "Inspect");
+	assert.equal(withId.querySelector(".subagent-inspect-toggle").textContent, "Hide inspector");
+	assert.equal(withId.querySelector(".subagent-inspect-panel").classList.contains("hidden"), false, "a child inspector opens with the list it belongs to");
 	assert.match(withId.textContent, /id step:0/);
 	assert.equal(withoutId.querySelector(".subagent-inspect"), null, "an id-less node must not get an action");
 	assert.equal(withoutId.querySelector(".subagent-inspect-toggle"), null);
@@ -731,15 +748,143 @@ test("offers the structured view only for child nodes that have an id", async ()
 	assert.equal(children[2].querySelector(".subagent-inspect-toggle") !== null, true);
 	assert.equal(children[3].querySelector(".subagent-inspect-toggle") !== null, true);
 	assert.equal(children[4].querySelector(".subagent-inspect-unavailable") !== null, true);
+	assert.equal(inspectCalls.length, 0, "hidden Subagents does not read any self-opened panel yet");
 
-	withId.querySelector(".subagent-inspect-toggle").click();
+	environment.document.getElementById("page-tab-subagents").click();
 	await flushTasks();
-	assert.equal(inspectCalls.length, 1, "only the clicked node is requested");
-	assert.deepEqual(JSON.parse(inspectCalls[0].options.body), { generation: INSPECT_GENERATION, id: "real-async-id", childId: "step:0" });
+	// Answer one queued read at a time: a second request while the first is unanswered would be
+	// refused by the host as `inspect_busy`, so the page must never send one.
+	const answerOne = async () => {
+		assert.equal(pending.length, 1, "exactly one inspection may be in flight");
+		pending.shift()(inspectOk(SUCCESS_INSPECT));
+		await flushTasks();
+		await flushTasks();
+	};
+	await answerOne();
+	await answerOne();
+	await answerOne();
+	await answerOne();
+	assert.equal(maxInFlight, 1, "the browser must not run two inspections at once");
+	assert.deepEqual(inspectCalls.map((call) => JSON.parse(call.options.body)), [
+		{ generation: INSPECT_GENERATION, id: "real-async-id" },
+		{ generation: INSPECT_GENERATION, id: "real-async-id", childId: "step:0" },
+		{ generation: INSPECT_GENERATION, id: "real-async-id", childId: "step:1" },
+		{ generation: INSPECT_GENERATION, id: "real-async-id", childId: "step:1:0" },
+	], "the selected run and each id-bearing child node are read exactly once");
 	assert.match(withId.querySelector(".subagent-inspect-panel").textContent, /child: step:0/);
 	assert.equal(withoutId.querySelector(".subagent-inspect-panel"), null);
 	assert.equal(page.state.subagentInspects.has("run:real-async-id#step:0"), true);
 	assert.equal(page.state.subagentInspects.has("run:real-async-id#anonymous step"), false, "no id may be invented for a node without one");
+});
+
+test("keeps one inspector for a single-step run and falls back to the run's own step", async () => {
+	// pi-subagents reports the one step of a single-step run as a child node, and that step's
+	// session file is the run's own: one conversation must not be offered twice, and the run panel
+	// falls back to that step when a run failed before registering its own session file.
+	const ownStep = { id: "step:0", mode: "step", label: "Review <safe>", state: "failed" };
+	const run = { ...INSPECT_RUN, mode: "subagent", children: [ownStep] };
+	const emptyRun = { asyncId: "real-async-id", status: "failed", messages: [], truncated: { task: false, messages: 0, finalOutput: false } };
+	const { environment, inspectCalls } = await bootInspect({
+		snapshot: subagentsSnapshot({ runs: [run] }),
+		respond: (_options, call) => (call === 1 ? inspectOk(emptyRun) : inspectOk({ ...SUCCESS_INSPECT, childId: "step:0" })),
+	});
+	environment.document.getElementById("page-tab-subagents").click();
+	await flushTasks();
+	await flushTasks();
+	assert.deepEqual(inspectCalls.map((call) => JSON.parse(call.options.body)), [
+		{ generation: INSPECT_GENERATION, id: "real-async-id" },
+		{ generation: INSPECT_GENERATION, id: "real-async-id", childId: "step:0" },
+	], "the run panel reads the run, then the step that is the run — nothing else");
+	assert.equal(runCard(environment).querySelector(".subagent-child"), null, "the run's own step is not listed as a second inspector");
+
+	const panel = runCard(environment).querySelector(".subagent-inspect-panel");
+	assert.match(panel.textContent, /child: step:0/, "the fallback panel says which step it was served from");
+	assert.match(panel.textContent, /run's own session file is unavailable/);
+	assert.match(panel.textContent, /structured-probe/, "that step's conversation is what the one panel shows");
+	assert.equal(runCard(environment).querySelectorAll(".subagent-inspect-panel").length, 1, "one inspector, not two");
+
+	// The run's own step stays listed when it has nested runs to parent — without a panel of its
+	// own, so the nested run keeps its inspector and nothing is read twice.
+	const nested = await bootInspect({
+		snapshot: subagentsSnapshot({ runs: [{ ...run, children: [{ ...ownStep, state: "complete", children: [{ id: "nested-run-id", mode: "subagent", label: "plan", state: "done" }] }] }] }),
+		respond: () => inspectOk(SUCCESS_INSPECT),
+	});
+	nested.environment.document.getElementById("page-tab-subagents").click();
+	await flushTasks();
+	await flushTasks();
+	const rows = runCard(nested.environment).querySelectorAll(".subagent-child");
+	assert.equal(rows.length, 2, "the run's own step stays as the parent of the nested run it spawned");
+	assert.match(rows[0].querySelector(".subagent-child-note").textContent, /This step is the run/);
+	assert.equal(runCard(nested.environment).querySelectorAll(".subagent-inspect-panel").length, 2, "two inspectors: the run's and the nested run's — none for the run's own step");
+	assert.equal(rows[1].querySelector(".subagent-inspect-toggle").textContent, "Hide inspector", "the nested run keeps its own inspector");
+	assert.deepEqual(nested.inspectCalls.map((call) => JSON.parse(call.options.body)), [
+		{ generation: INSPECT_GENERATION, id: "real-async-id" },
+		{ generation: INSPECT_GENERATION, id: "real-async-id", childId: "nested-run-id" },
+	], "only the run itself and the nested run are read");
+});
+
+test("queues a reader's click behind an inspection that is still in flight", async () => {
+	const run = { ...INSPECT_RUN, children: [{ id: "nested-run-id", mode: "subagent", label: "plan", state: "done" }] };
+	const pending = [];
+	const { environment, page, inspectCalls } = await bootInspect({
+		snapshot: subagentsSnapshot({ runs: [run] }),
+		respond: () => new Promise((resolve) => pending.push(resolve)),
+	});
+	environment.document.getElementById("page-tab-subagents").click();
+	await flushTasks();
+	assert.equal(pending.length, 1, "the selected run is read first");
+
+	// The reader closes one child inspector and re-opens it while the run's own read is still
+	// unanswered: that click must wait for the host's single slot, never race it.
+	const card = runCard(environment);
+	const childToggle = card.querySelectorAll(".subagent-child")[0].querySelector(".subagent-inspect-toggle");
+	childToggle.click();
+	await flushTasks();
+	childToggle.click();
+	await flushTasks();
+	assert.equal(pending.length, 1, "a click while another read is in flight is queued, not sent");
+	assert.equal(inspectCalls.length, 1);
+
+	pending.shift()(inspectOk(SUCCESS_INSPECT));
+	await flushTasks();
+	await flushTasks();
+	assert.equal(pending.length, 1, "the re-opened child is read next, once the slot is free");
+	assert.deepEqual(JSON.parse(inspectCalls[1].options.body), { generation: INSPECT_GENERATION, id: "real-async-id", childId: "nested-run-id" });
+	assert.equal(page.state.subagentInspects.get("run:real-async-id#nested-run-id").status, "loading");
+	pending.shift()(inspectOk(SUCCESS_INSPECT));
+	await flushTasks();
+	await flushTasks();
+	assert.equal(pending.length, 0);
+	assert.equal(page.state.subagentInspects.get("run:real-async-id#nested-run-id").status, "done");
+});
+
+test("remembers a collapsed child list and a closed child inspector across polls", async () => {
+	const run = { ...INSPECT_RUN, children: [{ id: "nested-run-id", mode: "subagent", label: "plan", state: "done" }] };
+	const { environment, page, inspectCalls } = await bootInspect({
+		snapshot: subagentsSnapshot({ runs: [run] }),
+		respond: () => inspectOk(SUCCESS_INSPECT),
+	});
+	environment.document.getElementById("page-tab-subagents").click();
+	await flushTasks();
+	await flushTasks();
+	assert.equal(inspectCalls.length, 2, "the selected run and its child are read once each");
+
+	const card = runCard(environment);
+	const children = card.querySelectorAll(".subagent-child");
+	children[0].querySelector(".subagent-inspect-toggle").click();
+	const details = card.querySelector(".subagent-children");
+	details.open = false;
+	details.dispatch("toggle");
+	assert.equal(page.state.subagentOpenChildren.get(run.id), false, "the reader's own collapse is what the page remembers");
+
+	environment.setSnapshot(subagentsSnapshot({ revision: 11, runs: [{ ...run, state: "completed", updatedAt: 1700000002000 }] }));
+	await environment.runNextTimer();
+	const rebuilt = runCard(environment);
+	assert.equal(rebuilt.querySelector(".subagent-children").open, false, "a collapsed child list stays collapsed through a poll");
+	const rebuiltChild = rebuilt.querySelectorAll(".subagent-child")[0];
+	assert.equal(rebuiltChild.querySelector(".subagent-inspect-toggle").textContent, "Inspect", "a child inspector the reader closed stays closed");
+	assert.equal(rebuiltChild.querySelector(".subagent-inspect-panel").classList.contains("hidden"), true);
+	assert.equal(inspectCalls.length, 2, "neither the poll nor the rebuild re-requests an answered panel");
 });
 
 test("keeps an answered structured view when the page is rebuilt by the next poll", async () => {
@@ -774,7 +919,7 @@ test("renders a foreground run's transcript instead of pretending a structured v
 	assert.equal(toggle.textContent, "Hide inspector");
 	assert.equal(panel.querySelector(".subagent-inspect-task"), null, "a transcript payload has no task section");
 	assert.equal(panel.querySelector(".subagent-inspect-final"), null);
-	assert.equal(panel.querySelectorAll(".subagent-inspect-message").length, 0);
+	assert.equal(panel.querySelectorAll(".subagent-inspect-heading").some((heading) => heading.textContent.startsWith("Messages")), false, "a transcript payload renders no structured message section");
 	assert.equal(panel.querySelector(".subagent-inspect-transcript").textContent, transcript);
 	assert.match(panel.textContent, /blocking \(foreground\) delegation/);
 	assert.match(panel.textContent, /run: real-async-id/, "the meta line names the run it inspected");

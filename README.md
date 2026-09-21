@@ -260,7 +260,11 @@ delays startup.
   not part of the structured payload (the extension sends previews, bounded per message), and
   the payload is capped at 200 messages / 1000 characters / 64 KB by the extension. If the
   structured command cannot read the async artifacts, the page keeps the explicit extension
-  error and the run-level **View transcript** text tail; no messages are invented.
+  error and the run-level **View transcript** text tail; no messages are invented. The chat
+  rows above are therefore a shared *rendering*, not more data: a tool call row shows the
+  extension's `[tool: …]` preview where the live transcript would show real arguments, and
+  message-level `isError` is not marked because the main conversation does not mark it either
+  (a failed tool result keeps its `(error)` summary and its output).
 - **Host-side child-session page for foreground runs.** When the inspect reply is the honest
   `{ kind: "transcript" }` foreground shape, the page immediately asks
   `POST /api/subagents/session` for `{ generation, id, index: 0 }`. The host derives
@@ -325,6 +329,32 @@ delays startup.
   Refresh is manual; **View transcript** is on-demand and sends only the current generation,
   run id, `view: "transcript"` and the fixed server-side line limit. Unavailable, timeout,
   failed-reply and empty/omitted status remain visibly distinct.
+- The Subagents page is a list plus one detail pane for the selected async run (the first real
+  run is selected by default; a fleet display key is never selectable). Opening the page is the
+  read-only viewing action: the selected run's transcript tail and its inspector are read once,
+  and **Child summaries** plus every child inspector showing an id open by default with them —
+  a child without an id in the snapshot says why it cannot be read. The host serves one
+  structured inspection per generation, so self-opening panels queue behind each other (the page
+  never runs two at once and never turns them into `inspect_busy` failures); an answered panel
+  and a panel the reader collapsed are never re-requested by a later poll. A `childId` panel is
+  keyed separately from its run, so the run panel and each child keep their own open state,
+  answer and error. All message rows in the structured view are drawn with the chat renderer of
+  the main conversation — the same user bubble, Markdown answer and collapsible tool blocks
+  (a short tool result opens, a long one starts collapsed, a failed one is labelled `(error)`) —
+  while the section headings, truncation notes and the panel's bounded internal scrolling stay
+  the inspector's own. Markdown rows are unmounted with their panel, so repainting or rebuilding
+  the page cannot leak a React root per message.
+- **A run's own step is not a second inspector.** pi-subagents reports the one step of a
+  single-step run as a child node whose session file is the run's own (`status.sessionFile ===
+  steps[0].sessionFile`, true for every single-step status on disk), so the run inspector and that
+  step's inspector would show the very same conversation. Such a step is therefore not listed as a
+  child at all — it stays visible only when it has nested runs to parent, and then without a panel
+  of its own — so the page shows one inspector and spends no inspection on the duplicate. When a
+  run failed before registering its own session file, the run panel falls back to that step and
+  says so (`child: step:0` plus a note), because that step's session is then the only readable
+  view. Workflow runs are exempt (their run-level session may be a distinct orchestrator/graph
+  session), and a multi-step run's step 0 can still repeat the run-level view when the two share
+  one session file — the snapshot does not say which step does, and the page never guesses.
 - Busy normal sends, unsupported delivery modes and unknown slash commands are rejected
   visibly; queued steer/follow-up responses say they were accepted/queued, not executed,
   while streaming extension-source slash commands are identified as immediate and not part of
@@ -439,7 +469,7 @@ Test inventory and the real-vs-stub boundary:
 | `test/model-server.test.js` | authenticated model/thinking routes, exact candidate-key forwarding, generation and Origin rejection | real HTTP against the real server |
 | `test/model-page.test.js` | candidate selectors, explicit submissions, effective-state and rejection feedback | strict fake DOM |
 | `test/subagents-server.test.js` | authenticated read-only details/refresh routes plus `POST /api/subagents/inspect` and `POST /api/subagents/session` (exact body allow-lists, generation/Origin/method rejection, id/childId/lines/index/cursor validation, extension error-code status mapping, unattached 503, and no host path in the responses) | real HTTP against the real server with a session-control fixture |
-| `test/subagents-page.test.js` | bounded fleet/async rendering, manual transcript detail, text-only output and visibly distinct timeout/omitted states, the foreground transcript panel, and fleet entries that render only the fields the DTO carries | strict fake DOM |
+| `test/subagents-page.test.js` | bounded fleet/async rendering, manual transcript detail, visibly distinct timeout/omitted states, the master-detail pane (default inspector, child summaries and child inspectors opening and reading themselves one at a time, a single-step run's own step left unlisted with the run panel falling back to it, a reader's collapse surviving every poll), the structured messages drawn as the main conversation's chat rows, the foreground transcript panel, and fleet entries that render only the fields the DTO carries | strict fake DOM |
 | `test/git-status.test.js` | the shared Git/usage implementation (`src/core/git-status.js`): active-branch usage aggregation, context null/known values, bounded cwd, injected Git normal/unborn/detached/non-repository handling, event refresh and generation disposal | public-API-shaped unit fixtures |
 | `test/subagents-rpc.test.js` | the shared read-only pi-subagents RPC consumer (`src/core/subagents-rpc.js`): correlated public ping/status RPC, generation-scoped fleet/async projection, identity separation, fixed transcript params, timeout/error distinction and redaction; plus the inspection path (retained-id/child-node allowlist, exact extension command text, single in-flight slot, bounded timeout, mapping of every extension error code and of `internal`/unknown codes, refusal of malformed or uncorrelated payloads and of an unavailable command channel, and the foreground transcript fallback with its own failure precedence) | public event-bus fixture with an injected inspect transport |
 | `test/inspect-reply.test.js` | the pure structured-reply parser and projection (`src/core/inspect-reply.js`): envelope validation (kind/version/requestId), rejection reasons for foreign, malformed and mismatched payloads, message/task/finalOutput re-bounding, `truncated` normalization, dropped-entry counting, credential and sensitive-path-field redaction, and the bounded payload/line helpers | pure unit tests, no session |
@@ -485,8 +515,13 @@ repository):
    display keys and async run ids remain separate; press **View transcript** for a listed
    async id and confirm only a bounded transcript tail appears. Entries must show only the
    fields the DTO carries (an absent `role`/`state` is omitted, never rendered as `Unknown`).
-   There must be no spawn/stop/steer, scheduler/configuration, filesystem or artifact
-   controls/paths.
+   Select an async run: its inspector and **Child summaries** must open by themselves, each
+   child inspector with an id must fill in one after another (never two requests at once), a
+   single-step run's own step must not be listed as a second inspector (the run panel is the one
+   view, and it falls back to that step when the run has no session file of its own), the message
+   rows must look like the chat page's rows, and collapsing a child list or an inspector must
+   survive the next poll. There must be no spawn/stop/steer, scheduler/configuration, filesystem
+   or artifact controls/paths.
 5. Run a blocking delegation (ask the agent for one foreground `subagent` call) and press
    **Inspect** on that chat row: the panel must answer with a transcript (`State:`/`Child:`/
    `Result transcript tail:`), then load the derived child session when it exists. Thinking,

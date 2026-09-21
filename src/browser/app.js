@@ -107,6 +107,10 @@ const state = {
 	subagentInspects: new Map(),
 	subagentInspectNodes: new Map(),
 	subagentOpenChildren: new Map(),
+	// The host answers one structured inspection per generation at a time, so every panel that
+	// opens itself waits in this queue instead of racing the others into `inspect_busy`.
+	subagentInspectQueue: [],
+	subagentInspectDraining: false,
 };
 
 function readToken() {
@@ -646,11 +650,15 @@ async function requestSubagentDetail(card, id, button, resultElement) {
  * Structured subagent inspection (read-only).
  *
  * `POST /api/subagents/inspect` answers with the host's bounded projection of the child
- * session (task, messages, final output, truncation flags). The panel stays collapsed and
- * sends nothing until the user clicks its own toggle, and everything it shows is built
- * with textContent/DOM only, so host text is never parsed as markup. The raw artifact tail
- * ("View transcript") keeps its own path and stays the fallback when this view cannot
- * answer.
+ * session (task, messages, final output, truncation flags). The selected run's own panel
+ * opens on its own and so does every child summary under it, while a chat-attributed run
+ * stays collapsed until its row asks for it; because the host accepts one inspection per
+ * generation at a time, self-opening panels are queued (`drainInspectQueue`) rather than
+ * sent at once. Message rows are drawn with the chat renderer the main conversation uses —
+ * the same user bubble, Markdown answer and collapsible tool blocks — so the read-only view
+ * cannot drift into a second, flat text style; no host text is ever assigned to markup, and
+ * the panel body still builds every node itself. The raw artifact tail ("View transcript")
+ * keeps its own path and stays the fallback when this view cannot answer.
  */
 
 /**
@@ -699,7 +707,9 @@ function inspectEntry(key, runId, { open = false } = {}) {
 		existing.runId = runId;
 		return existing;
 	}
-	const entry = { runId, open, status: "idle", payload: null, code: null, message: null, session: null };
+	// `fallbackChildId` is the run's own step, kept by `renderChildrenList` so a run whose own
+	// session file is gone can still be read in this panel instead of showing nothing.
+	const entry = { runId, open, status: "idle", payload: null, code: null, message: null, session: null, fallbackChildId: null };
 	state.subagentInspects.set(key, entry);
 	return entry;
 }
@@ -723,18 +733,6 @@ function inspectMessageKind(message) {
 		return "toolResult";
 	}
 	return "text";
-}
-
-function inspectMessageLabel(message, kind) {
-	const role = subagentValue(message.role);
-	const name = typeof message.name === "string" && message.name.length > 0 ? message.name : "";
-	if (kind === "toolCall") {
-		return `${role} · tool call: ${name || "tool"}`;
-	}
-	if (kind === "toolResult") {
-		return `tool result${name ? `: ${name}` : ""}${message.isError === true ? " (error)" : ""}`;
-	}
-	return role;
 }
 
 function appendInspectHeading(parent, text, suffix = "") {
@@ -776,24 +774,34 @@ function renderInspectMessages(body, inspect, truncated) {
 		);
 		return;
 	}
-	const list = document.createElement("ol");
-	list.className = "subagent-inspect-messages";
-	for (const message of messages) {
+	for (const [index, message] of messages.entries()) {
 		if (!message || typeof message !== "object") {
 			continue;
 		}
-		const item = document.createElement("li");
-		item.className = "subagent-inspect-message";
-		const kind = inspectMessageKind(message);
-		item.dataset.kind = kind;
-		if (message.isError === true) {
-			item.dataset.state = "error";
-		}
-		appendSubagentText(item, "subagent-inspect-label", inspectMessageLabel(message, kind));
-		appendSubagentText(item, "subagent-inspect-text", typeof message.text === "string" && message.text.length > 0 ? message.text : "(empty message)");
-		list.append(item);
+		body.append(inspectMessageCard(message, index));
 	}
-	body.append(list);
+}
+
+/**
+ * One structured inspect message, drawn by the chat renderer the main conversation uses: the
+ * familiar rows (user bubble, Markdown answer, collapsible tool blocks) instead of a second,
+ * flat style for the same data. pi-subagents sends no blocks of its own, so exactly one is
+ * synthesised from the message kind and the chat renderer decides Markdown, disclosure and
+ * error marking for it — including the "(error)" summary of a failed tool result.
+ */
+function inspectMessageCard(message, index) {
+	const kind = inspectMessageKind(message);
+	const name = typeof message.name === "string" ? message.name : "";
+	const text = typeof message.text === "string" && message.text.length > 0 ? message.text : "(empty message)";
+	const role = typeof message.role === "string" && message.role.length > 0 ? message.role : "system";
+	const blocks = kind === "toolCall"
+		? [{ type: "toolCall", name, arguments: text }]
+		: kind === "toolResult"
+			? [{ type: "toolResult", name, content: text, isError: message.isError === true }]
+			: [{ type: "text", text }];
+	// Only a text message carries its text beside the block: a tool block *is* the content, and the
+	// chat renderer would otherwise add a duplicate plain-text row for it.
+	return chatCardFor({ id: `subagent-inspect-message-${index}`, role, kind, toolName: name, blocks, text: kind === "text" ? text : "" });
 }
 
 function renderInspectContent(body, inspect) {
@@ -847,6 +855,11 @@ function renderInspectTranscript(body, inspect) {
 	}
 }
 
+/** A structured read that is queued for the host's single inspection slot, or already on the wire. */
+function inspectWaiting(status) {
+	return status === "loading" || status === "queued";
+}
+
 /** Repaint one existing panel from its cached entry (never sends a request by itself). */
 function paintInspect(nodes) {
 	const entry = state.subagentInspects.get(nodes.key);
@@ -857,14 +870,17 @@ function paintInspect(nodes) {
 	nodes.toggle.textContent = open ? "Hide inspector" : "Inspect";
 	nodes.toggle.setAttribute("aria-expanded", open ? "true" : "false");
 	nodes.panel.classList.toggle("hidden", !open);
-	nodes.panel.setAttribute("aria-busy", entry.status === "loading" ? "true" : "false");
+	nodes.panel.setAttribute("aria-busy", inspectWaiting(entry.status) ? "true" : "false");
 	clearElement(nodes.status);
+	// A Markdown row owns a React root: unmount it before its nodes are dropped, exactly as the
+	// chat transcript does, so a repaint cannot leak one host per message.
+	unmountMarkdownHosts(nodes.body);
 	clearElement(nodes.body);
 	nodes.status.dataset.state = "";
 	if (entry.status === "idle") {
 		return;
 	}
-	if (entry.status === "loading") {
+	if (inspectWaiting(entry.status)) {
 		nodes.status.dataset.state = "waiting";
 		nodes.status.textContent = "Requesting the read-only view…";
 		return;
@@ -890,11 +906,16 @@ function paintInspect(nodes) {
 	if (typeof inspect.label === "string" && inspect.label.length > 0) {
 		parts.push(`label: ${inspect.label}`);
 	}
-	if (nodes.childId) {
-		parts.push(`child: ${nodes.childId}`);
+	// A run-scoped panel names the step it was served from only when that fallback happened.
+	const scopedChildId = nodes.childId ?? (typeof inspect.childId === "string" && inspect.childId.length > 0 ? inspect.childId : null);
+	if (scopedChildId) {
+		parts.push(`child: ${scopedChildId}`);
 	}
 	if (parts.length > 0) {
 		appendSubagentText(nodes.body, "subagent-inspect-meta", parts.join(" · "));
+	}
+	if (!nodes.childId && scopedChildId) {
+		appendInspectNote(nodes.body, `The run's own session file is unavailable, so this inspector reads its step ${scopedChildId} instead.`);
 	}
 	renderInspectContent(nodes.body, inspect);
 	// A blocking (foreground) run has no structured view, but its child session file holds the
@@ -1028,7 +1049,7 @@ function setInspectFailure(key, code, message) {
 	repaintInspect(key);
 }
 
-async function requestInspect(nodes) {
+async function requestInspect(nodes, { childId = null } = {}) {
 	const entry = state.subagentInspects.get(nodes.key);
 	if (!entry) {
 		return;
@@ -1037,9 +1058,10 @@ async function requestInspect(nodes) {
 		setInspectFailure(nodes.key, "no_generation", "the page is not attached to a session generation yet");
 		return;
 	}
+	const scopedChildId = childId ?? nodes.childId;
 	const body = { generation: state.generation, id: entry.runId };
-	if (nodes.childId) {
-		body.childId = nodes.childId;
+	if (scopedChildId) {
+		body.childId = scopedChildId;
 	}
 	try {
 		const response = await api("/api/subagents/inspect", { method: "POST", body });
@@ -1071,6 +1093,16 @@ async function requestInspect(nodes) {
 			await requestChildSession(nodes);
 			return;
 		}
+		// A run that failed before registering its own session file still has its one step's session
+		// on disk: read that step in this same panel instead of leaving the reader with an empty
+		// conversation (§ `runOwnStep`). One shot — the step's own reply is never expanded further.
+		const isEmpty = !Array.isArray(inspect.messages) || inspect.messages.length === 0;
+		if (childId === null && !nodes.childId && isEmpty && entry.fallbackChildId) {
+			const fallback = entry.fallbackChildId;
+			entry.fallbackChildId = null;
+			await requestInspect(nodes, { childId: fallback });
+			return;
+		}
 		repaintInspect(nodes.key);
 	} catch (error) {
 		setInspectFailure(nodes.key, "network", error instanceof Error ? error.message : String(error));
@@ -1089,16 +1121,24 @@ function toggleInspect(nodes) {
 	}
 	entry.open = true;
 	// Every genuine open takes a fresh snapshot: the panel has no refresh control and shows a
-	// point-in-time answer, so reusing a previous one would make a running run look frozen.
-	entry.status = "loading";
+	// point-in-time answer, so reusing a previous one would make a running run look frozen. The
+	// read joins the queue as well: the reader may click while another panel is still unanswered,
+	// and the host would refuse a second request with `inspect_busy`.
+	entry.status = "queued";
 	entry.payload = null;
 	entry.code = null;
 	entry.message = null;
+	entry.session = null;
 	paintInspect(nodes);
-	requestInspect(nodes);
+	enqueueInspect(nodes.key);
 }
 
-/** Collapsed-by-default toggle + panel for one run or one id-bearing child node. */
+/**
+ * Toggle + panel for one run or one id-bearing child node. `open` only decides the state a panel
+ * is *created* in: the selected run and its child summaries are built open (and queued for their
+ * read), a chat row stays collapsed until the reader asks for it, and an existing entry always
+ * keeps the state and answer it already has.
+ */
 function buildInspectPanel({ runId, childId = null, label, keyPrefix = "run", open = false }) {
 	const key = inspectKey(runId, childId, keyPrefix);
 	inspectEntry(key, runId, { open });
@@ -1140,14 +1180,40 @@ function buildInspectPanel({ runId, childId = null, label, keyPrefix = "run", op
 	return container;
 }
 
+/**
+ * The step node that *is* the run, when pi-subagents reports one.
+ *
+ * A run's children are its steps (`kind: "step"`, the host projects them as `mode: step`) plus any
+ * nested runs those steps spawned. For a run with exactly one step, the run-level inspector and
+ * that step's inspector read the same session file — the status keeps the run's own session in
+ * `sessionFile` and points its one step at it (checked against every single-step status on disk) —
+ * so opening both would show one conversation twice. A workflow run is excluded: its run-level
+ * session may be a distinct graph/orchestrator session, and the snapshot does not say which step
+ * shares it.
+ */
+function runOwnStep(run) {
+	if (run.mode === "workflow") {
+		return null;
+	}
+	const steps = (Array.isArray(run.children) ? run.children : []).filter((child) => child?.mode === "step");
+	return steps.length === 1 ? steps[0] : null;
+}
+
 /** Bounded child list: id-bearing nodes get their own view, others say why they cannot. */
-function renderChildNode(runId, child, depth = 0) {
+function renderChildNode(runId, child, depth = 0, ownStep = false) {
 	const item = document.createElement("li");
 	item.className = "subagent-child";
 	appendSubagentText(item, "subagent-child-summary", summaryText(child));
 	const childId = typeof child?.id === "string" && child.id.length > 0 ? child.id : null;
-	if (childId) {
-		item.append(buildInspectPanel({ runId, childId, label: `Read-only inspector for child node ${childId}` }));
+	if (ownStep) {
+		// No panel here: the inspector above reads this step's own session, and a run whose own
+		// session file is gone is served from this step by that same panel.
+		appendSubagentText(item, "subagent-child-note", "This step is the run: the inspector above reads its session.");
+	} else if (childId) {
+		// A child summary is part of the selected run's read-only view: its inspector opens with
+		// the list instead of hiding behind another click. Reading it is queued, never sent at
+		// once (see `queueSelectedInspects`).
+		item.append(buildInspectPanel({ runId, childId, label: `Read-only inspector for child node ${childId}`, open: true }));
 	} else {
 		appendSubagentText(
 			item,
@@ -1172,18 +1238,32 @@ function renderChildrenList(card, run) {
 	if (children.length === 0) {
 		return;
 	}
+	// The run's own step *is* the run: the inspector above reads that session, so listing it here
+	// would offer one conversation twice. It stays listed only when it has nested runs to parent;
+	// its id becomes the run panel's fallback source for a run whose own session file is gone.
+	const ownStep = runOwnStep(run);
+	const ownStepId = typeof ownStep?.id === "string" && ownStep.id.length > 0 ? ownStep.id : null;
+	const runEntry = state.subagentInspects.get(inspectKey(run.id));
+	if (runEntry) {
+		runEntry.fallbackChildId = ownStepId;
+	}
+	const visible = children.filter((child) => child !== ownStep || (Array.isArray(child?.children) && child.children.length > 0));
+	if (visible.length === 0) {
+		return;
+	}
 	const details = document.createElement("details");
 	details.className = "subagent-children";
-	// Each poll rebuilds the page; keep the disclosure the reader opened open.
-	details.open = state.subagentOpenChildren.get(run.id) === true;
+	// Child summaries are open by default; only a reader's own collapse is remembered, so a poll
+	// that rebuilds the card cannot hide them again.
+	details.open = state.subagentOpenChildren.get(run.id) !== false;
 	details.addEventListener("toggle", () => {
 		state.subagentOpenChildren.set(run.id, details.open === true);
 	});
 	const summary = document.createElement("summary");
-	summary.textContent = `Child summaries (${children.length})`;
+	summary.textContent = `Child summaries (${visible.length})`;
 	const list = document.createElement("ul");
-	for (const child of children) {
-		list.append(renderChildNode(run.id, child));
+	for (const child of visible) {
+		list.append(renderChildNode(run.id, child, 0, child === ownStep));
 	}
 	details.append(summary, list);
 	card.append(details);
@@ -1408,25 +1488,76 @@ function updateSelectedSubagentHeader(run) {
 	elements.subagentsDetailState.dataset.state = typeof run.state === "string" ? run.state : "";
 }
 
-function startSelectedSubagentReads(card, run) {
-	if (state.subagentsAutoLoadedRunIds.has(run.id)) {
+/**
+ * The host serves one structured inspection per generation, while the selected run opens its own
+ * panel and one per child summary: queue them so they are read one at a time instead of racing
+ * each other into `inspect_busy`. A reader's click joins the same queue.
+ */
+function enqueueInspect(key) {
+	if (!state.subagentInspectQueue.includes(key)) {
+		state.subagentInspectQueue.push(key);
+	}
+	drainInspectQueue();
+}
+
+async function drainInspectQueue() {
+	if (state.subagentInspectDraining) {
 		return;
 	}
-	state.subagentsAutoLoadedRunIds.add(run.id);
-	// Opening the selected page is an explicit read-only viewing action. Show both halves of the
-	// detail pane once: transcript first, inspector second. The maps/sets keep later polls from
-	// repeating either read, while the buttons remain available for an explicit cached retry.
-	const transcriptButton = card.querySelector(".subagent-transcript-button");
-	const transcriptResult = card.querySelector(".subagent-transcript-result");
-	if (transcriptButton && transcriptResult) {
-		requestSubagentDetail(card, run.id, transcriptButton, transcriptResult);
+	state.subagentInspectDraining = true;
+	try {
+		while (state.subagentInspectQueue.length > 0) {
+			const key = state.subagentInspectQueue.shift();
+			const nodes = state.subagentInspectNodes.get(key);
+			const entry = state.subagentInspects.get(key);
+			// A panel the reader closed, one the last poll dropped, or one that already carries an
+			// answer: there is nothing left to read for this key. `queued` is a panel the reader just
+			// opened, `idle` one that opened itself and has not been read yet.
+			if (!nodes || !entry || entry.open !== true) {
+				continue;
+			}
+			if (entry.status !== "idle" && entry.status !== "queued") {
+				continue;
+			}
+			entry.status = "loading";
+			paintInspect(nodes);
+			await requestInspect(nodes);
+		}
+	} finally {
+		state.subagentInspectDraining = false;
 	}
-	const inspectKeyForRun = inspectKey(run.id);
-	const inspectNodes = state.subagentInspectNodes.get(inspectKeyForRun);
-	const inspectEntryForRun = state.subagentInspects.get(inspectKeyForRun);
-	if (inspectNodes && inspectEntryForRun?.status === "idle") {
-		requestInspect(inspectNodes);
+}
+
+/**
+ * Queue every panel of the selected run that is open and still unanswered. This runs on each
+ * render of the selected card, so a child that appears in a later poll is read too, while a panel
+ * that already has an answer (or that the reader collapsed) is never re-requested.
+ */
+function queueSelectedInspects(run) {
+	const runKey = inspectKey(run.id);
+	const childrenShown = state.subagentOpenChildren.get(run.id) !== false;
+	const belongsToRun = (candidate) => candidate === runKey || (childrenShown && candidate.startsWith(`${runKey}#`));
+	for (const [key, entry] of state.subagentInspects) {
+		if (!belongsToRun(key) || entry.open !== true || entry.status !== "idle") {
+			continue;
+		}
+		enqueueInspect(key);
 	}
+}
+
+function startSelectedSubagentReads(card, run) {
+	if (!state.subagentsAutoLoadedRunIds.has(run.id)) {
+		state.subagentsAutoLoadedRunIds.add(run.id);
+		// Opening the selected page is an explicit read-only viewing action. The transcript stays
+		// one bounded read on the first pass; the inspector panels open by themselves and are
+		// queued one at a time.
+		const transcriptButton = card.querySelector(".subagent-transcript-button");
+		const transcriptResult = card.querySelector(".subagent-transcript-result");
+		if (transcriptButton && transcriptResult) {
+			requestSubagentDetail(card, run.id, transcriptButton, transcriptResult);
+		}
+	}
+	queueSelectedInspects(run);
 }
 
 function renderSelectedSubagent(run, { autoLoad = false } = {}) {
@@ -1435,11 +1566,15 @@ function renderSelectedSubagent(run, { autoLoad = false } = {}) {
 		setSubagentsEmptyMessage("Select an async run from the list to view its transcript and inspector.");
 		elements.subagentsDetailEmpty.classList.remove("hidden");
 		elements.subagentsDetailContent.classList.add("hidden");
+		unmountMarkdownHosts(elements.subagentsDetailContent);
 		clearElement(elements.subagentsDetailContent);
 		return;
 	}
 	elements.subagentsDetailEmpty.classList.add("hidden");
 	elements.subagentsDetailContent.classList.remove("hidden");
+	// The pane is rebuilt on every poll: release the Markdown roots of the previous pass before
+	// its nodes are dropped.
+	unmountMarkdownHosts(elements.subagentsDetailContent);
 	clearElement(elements.subagentsDetailContent);
 	const card = renderAsyncRun(run, { inspectorOpen: autoLoad });
 	elements.subagentsDetailContent.append(card);
@@ -2396,6 +2531,7 @@ async function poll() {
 			state.subagentInspects.clear();
 			state.subagentInspectNodes.clear();
 			state.subagentOpenChildren.clear();
+			state.subagentInspectQueue.length = 0;
 			state.subagentsSelectedRunId = null;
 			state.subagentsAutoLoadedRunIds.clear();
 			state.subagentsSnapshot = null;
